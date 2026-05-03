@@ -662,8 +662,8 @@
         }
         const txEl = document.getElementById("status-tx");
         const rxEl = document.getElementById("status-rx");
-        if (txEl) txEl.textContent = data.net_tx_kbps != null ? Math.round(data.net_tx_kbps/8)+" kB/s" : "N/A";
-        if (rxEl) rxEl.textContent = data.net_rx_kbps != null ? Math.round(data.net_rx_kbps/8)+" kB/s" : "N/A";
+        if (txEl) txEl.textContent = data.net_iface && data.net_tx_kbps != null ? (data.net_tx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
+        if (rxEl) rxEl.textContent = data.net_iface && data.net_rx_kbps != null ? (data.net_rx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
         if (data.io_devices) renderIO(data.io_devices);
         refreshDot(data.camera_ok);
         if (data.camera_ok) {
