@@ -212,15 +212,15 @@ def publisher_active():
 atexit.register(stop_mediamtx)
 atexit.register(stop_publisher)
 
-# Kill leftovers
+# Kill any leftover processes from a previous run.
+# Subprocess startup (start_mediamtx / start_publisher) is intentionally
+# deferred to _start_bg_threads(), which runs in the gunicorn worker process
+# AFTER fork — this ensures the worker is the proper parent of those
+# subprocesses and Popen.poll() works correctly.
 for sig in (["pkill", "-x", "mediamtx"], ["pkill", "-x", "mtxrpicam"],
             ["pkill", "-f", "publisher.py"]):
     subprocess.run(sig, capture_output=True)
 time.sleep(1)
-
-start_mediamtx()
-time.sleep(2)
-start_publisher()
 
 # ---------------------------------------------------------------------------
 # WATCHDOG
@@ -299,12 +299,19 @@ class NetworkMonitor:
 net_monitor = None
 
 def _start_bg_threads():
-    """Start background threads. Must run inside the serving process (after gunicorn fork)."""
+    """Start subprocesses and background threads.
+    Must run inside the gunicorn WORKER (after fork) so that Popen objects
+    are owned by the serving process and poll() / wait() work correctly.
+    Called via gunicorn post_worker_init — do NOT call at module level."""
     global net_monitor
+    start_mediamtx()
+    time.sleep(2)
+    start_publisher()
     net_monitor = NetworkMonitor()
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
-_start_bg_threads()
+# NOTE: _start_bg_threads() is intentionally NOT called here.
+# It is called only in the gunicorn worker via post_worker_init.
 
 # ---------------------------------------------------------------------------
 # ROUTES
@@ -315,7 +322,7 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    net = net_monitor.stats()
+    net = net_monitor.stats() if net_monitor else {"iface": None, "tx_kbps": 0.0, "rx_kbps": 0.0}
     ok  = mediamtx_active() and publisher_active()
     return jsonify({
         "resolution": settings["resolution"],
