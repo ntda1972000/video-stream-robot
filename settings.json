@@ -1,0 +1,26 @@
+{
+  "resolution": [
+    640,
+    480
+  ],
+  "fps": 20,
+  "io_devices": [
+    {
+      "name": "light",
+      "state": true
+    },
+    {
+      "name": "Device 2",
+      "state": false
+    },
+    {
+      "name": "Device 3",
+      "state": false
+    },
+    {
+      "name": "Device 4",
+      "state": false
+    }
+  ],
+  "rotation": 180
+}

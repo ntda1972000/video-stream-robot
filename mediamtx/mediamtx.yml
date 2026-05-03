@@ -1,0 +1,71 @@
+###############################################################
+# mediamtx.yml — Cấu hình MediaMTX cho Robot Streaming
+# Video + Âm thanh 2 chiều (Pi → Browser & Browser → Pi)
+###############################################################
+
+# ── Logging ───────────────────────────────────────────────────
+logLevel: info
+logDestinations: [stdout]
+
+# ── RTSP (Python publisher dùng cổng này) ────────────────────
+rtsp: yes
+rtspAddress: :8554
+protocols: [tcp, udp]
+
+# ── RTMP (tắt nếu không dùng) ────────────────────────────────
+rtmp: no
+
+# ── HLS (tắt để nhẹ máy) ────────────────────────────────────
+hls: no
+
+# ── WebRTC (giao thức chính cho browser) ─────────────────────
+webrtc: yes
+webrtcAddress: :8889
+webrtcICEHostNAT1To1IPs: []
+# STUN servers disabled for LAN-only use
+webrtcICEServers2: []
+
+# ── API nội bộ ───────────────────────────────────────────────
+api: yes
+apiAddress: 127.0.0.1:9997
+
+###############################################################
+# PATHS — Định nghĩa các luồng
+###############################################################
+paths:
+
+  # ----------------------------------------------------------
+  # Luồng chính: Python Publisher → Browser
+  # URL: rtsp://localhost:8554/robot  (Pi gửi lên)
+  # URL: http://<IP>:8889/robot       (Browser xem)
+  # ----------------------------------------------------------
+  robot:
+    # Python publisher sẽ gửi video + audio lên đây
+    source: publisher
+
+    # Cho phép bất kỳ ai publish (chỉ dùng LAN)
+    publishUser:
+    publishPass:
+
+    # Không tự động xoá path khi không có ai
+    record: no
+
+  # ----------------------------------------------------------
+  # Luồng từ Browser → Pi (Âm thanh 2 chiều)
+  # Browser publish mic audio tới: http://<IP>:8889/from-browser
+  # MediaMTX nhận và dùng ffmpeg phát ra loa của Pi
+  # ----------------------------------------------------------
+  from-browser:
+    source: publisher
+
+    # Khi có browser gửi audio lên, tự động phát ra loa Pi
+    # Lệnh này pull từ RTSP nội bộ rồi đẩy ra ALSA
+    runOnReady: >-
+      ffmpeg -loglevel warning
+      -i rtsp://127.0.0.1:8554/from-browser
+      -af aresample=44100
+      -f alsa default
+    runOnReadyRestart: yes
+
+    # Dọn dẹp khi browser ngắt kết nối
+    runOnNotReady: ""

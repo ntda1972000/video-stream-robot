@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Robot &mdash; Control Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      background: #212121;
+      color: #ececec;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+    @media (min-width: 769px) { html, body { height: 100%; overflow: hidden; } }
+
+    .shell {
+      display: flex; flex-direction: column;
+      padding: 8px max(8px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(8px,env(safe-area-inset-left));
+      gap: 6px;
+    }
+    @media (min-width: 769px) { .shell { height: 100vh; height: 100dvh; overflow: hidden; } }
+
+    /* Top bar — hidden on mobile */
+    .top-bar { display: flex; align-items: center; flex-shrink: 0; height: 40px; }
+    h1 { font-size: 1rem; font-weight: 600; }
+    @media (max-width: 768px) { .top-bar { display: none; } }
+
+    /* Main grid */
+    .main { flex: 1; min-height: 0; display: grid; gap: 8px; }
+    @media (min-width: 769px) { .main { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 768px) { .main { grid-template-columns: 1fr; } }
+
+    /* ── Stream panel ── */
+    .stream-panel {
+      position: relative; background: #000;
+      border: 1px solid #3f3f3f; border-radius: 10px;
+      overflow: hidden; min-height: 0;
+    }
+    /* Mobile: let aspect-ratio drive the height so no black bars for 4:3 content */
+    @media (max-width: 768px) {
+      .stream-panel { width: 100%; aspect-ratio: 4 / 3; max-height: 55vh; height: auto; min-height: 0; }
+    }
+    #stream-video {
+      width: 100%; height: 100%; object-fit: contain; display: block;
+      transition: transform 0.35s ease;
+    }
+
+    /* ── Overlay button (shared: rotate + audio) ── */
+    .ov-btn {
+      width: 30px; height: 30px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+      color: #ccc; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0; flex-shrink: 0;
+      transition: background 0.18s, border-color 0.18s, color 0.18s;
+    }
+    .ov-btn svg { display: block; pointer-events: none; }
+    .ov-btn.active { background: rgba(16,163,127,0.72); border-color: #10a37f; color: #fff; }
+    .ov-btn.pending { opacity: 0.4; cursor: wait; }
+    .ov-btn:active { opacity: 0.65; }
+
+    /* ── Rotation cluster — top-left ── */
+    .ov-tl {
+      position: absolute; top: 8px; left: 8px;
+      display: flex; gap: 5px; z-index: 10;
+    }
+
+    /* ── Audio cluster — bottom-right ── */
+    .ov-br {
+      position: absolute; bottom: 8px; right: 8px;
+      display: flex; flex-direction: column; gap: 5px;
+      align-items: flex-end; z-index: 10;
+    }
+
+    /* Each audio item: relative anchor for the popup */
+    .ov-item { position: relative; }
+
+    /* Popup: appears to the LEFT of the icon, grows upward, content stacked vertically */
+    .ov-popup {
+      position: absolute;
+      right: calc(100% + 6px);
+      bottom: 0;
+      transform-origin: right bottom;
+      transform: scale(0);
+      opacity: 0;
+      pointer-events: none;
+      transition: transform 0.2s ease, opacity 0.15s ease;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      background: rgba(0,0,0,0.68); backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 14px;
+      padding: 10px 7px;
+    }
+    .ov-item.open .ov-popup {
+      transform: scale(1);
+      opacity: 1; pointer-events: auto;
+    }
+
+    /* Small mute toggle inside speaker popup */
+    .ov-mute-btn {
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.22);
+      background: rgba(255,255,255,0.10);
+      color: #ccc; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0; flex-shrink: 0;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .ov-mute-btn svg { display: block; pointer-events: none; }
+    .ov-mute-btn.active { background: rgba(16,163,127,0.6); border-color: #10a37f; color: #fff; }
+    .ov-mute-btn:active { opacity: 0.65; }
+
+    /* Range sliders inside popups — vertical orientation */
+    .ov-range {
+      writing-mode: vertical-lr;
+      direction: rtl;          /* min at bottom, max at top */
+      -webkit-appearance: none; appearance: none;
+      width: 4px; height: 72px;
+      background: rgba(255,255,255,0.22);
+      border-radius: 2px; outline: none; cursor: pointer; flex-shrink: 0;
+    }
+    .ov-range::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 14px; height: 14px;
+      border-radius: 50%; background: #ddd; cursor: pointer; border: none;
+    }
+    .ov-range::-moz-range-thumb {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #ddd; cursor: pointer; border: none;
+    }
+    /* Fill from bottom (0) upward using 'to top' gradient */
+    .ov-range.lit {
+      background: linear-gradient(to top,
+        rgba(16,163,127,0.8) var(--pct,50%),
+        rgba(255,255,255,0.2) var(--pct,50%));
+    }
+    .ov-range.lit::-webkit-slider-thumb { background: #10a37f; }
+    .ov-range.lit::-moz-range-thumb     { background: #10a37f; }
+
+    /* ── Side panel ── */
+    .side-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+
+    /* ── Status card ── */
+    .status-card {
+      background: #2f2f2f; border: 1px solid #3f3f3f;
+      border-radius: 10px; padding: 8px 12px; flex-shrink: 0;
+    }
+    .card-title {
+      font-size: 0.65rem; letter-spacing: 0.5px; text-transform: uppercase;
+      color: #8e8ea0; margin-bottom: 6px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .cam-dot { width: 7px; height: 7px; border-radius: 50%; background: #565869; flex-shrink: 0; transition: background 0.3s; }
+    .cam-dot.ok  { background: #10a37f; }
+    .cam-dot.err { background: #ef4444; animation: blink 1s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    .status-row { display: flex; gap: 5px; }
+    .stat {
+      flex: 1; min-width: 0; container-type: inline-size;
+      background: #212121; border: 1px solid #3f3f3f;
+      border-radius: 6px; padding: 5px 4px; text-align: center;
+    }
+    .stat-label { font-size: 9cqi; text-transform: uppercase; letter-spacing: 0.4px; color: #565869; margin-bottom: 2px; }
+    .stat-value { font-size: 14cqi; font-weight: 600; color: #10a37f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat-sel {
+      width: 100%; background: transparent; border: none; color: #10a37f;
+      font-size: 13cqi; font-weight: 600; cursor: pointer; outline: none;
+      text-align: center; text-align-last: center;
+      -webkit-appearance: none; appearance: none; padding: 0;
+    }
+    .stat-sel option { background: #2a2a2a; color: #ececec; }
+
+    /* ── Control card ── */
+    .control-card {
+      background: #2f2f2f; border: 1px solid #3f3f3f;
+      border-radius: 10px; padding: 8px 12px;
+      display: flex; flex-direction: column;
+    }
+    @media (min-width: 769px) { .control-card { flex: 1; min-height: 0; } }
+    .control-card .card-title { margin-bottom: 4px; flex-shrink: 0; }
+    .control-inner {
+      flex: 1; min-height: 0; overflow-y: auto;
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+    }
+    .control-inner::-webkit-scrollbar { width: 3px; }
+    .control-inner::-webkit-scrollbar-track { background: transparent; }
+    .control-inner::-webkit-scrollbar-thumb { background: #3f3f3f; border-radius: 2px; }
+
+    /* ── Joystick ── */
+    .joystick-wrapper { display: flex; flex-direction: column; align-items: center; gap: 5px; flex-shrink: 0; padding: 4px 0; width: 100%; }
+    .dir-display { font-size: 0.7rem; color: #8e8ea0; height: 16px; text-align: center; }
+    .dir-display span { color: #10a37f; font-weight: 600; }
+    .joystick-track {
+      position: relative; border-radius: 50%;
+      background: #212121; border: 2px solid #3f3f3f;
+      touch-action: none; user-select: none;
+    }
+    .joystick-track::before {
+      content:''; position:absolute; inset:0; border-radius:50%;
+      background: radial-gradient(circle at center,rgba(16,163,127,0.07) 0%,transparent 70%);
+      pointer-events:none;
+    }
+    .joystick-track::after {
+      content:''; position:absolute; inset:0; border-radius:50%;
+      background: linear-gradient(#3f3f3f 1px,transparent 1px),linear-gradient(90deg,#3f3f3f 1px,transparent 1px);
+      background-size:100% 50%,50% 100%; background-position:center;
+      pointer-events:none;
+    }
+    .joystick-knob {
+      position:absolute; width:24%; height:24%; border-radius:50%;
+      background: radial-gradient(circle at 35% 35%,#1fc99a,#10a37f);
+      box-shadow:0 3px 12px rgba(16,163,127,0.5);
+      transform:translate(-50%,-50%); top:50%; left:50%;
+      pointer-events:none; transition:box-shadow 0.1s;
+    }
+    .joystick-knob.active { box-shadow:0 3px 22px rgba(16,163,127,0.9); }
+    .joy-footer { display:flex; justify-content:space-between; width:100%; padding:0 2px; }
+    .speed-badge { font-size:0.65rem; color:#565869; }
+    .speed-badge span { color:#10a37f; font-weight:600; }
+    .current-speed { font-size:0.65rem; color:#565869; }
+    .current-speed span { color:#ececec; font-weight:700; font-size:0.8rem; }
+
+    /* ── I/O panel ── */
+    .io-panel { width:100%; flex-shrink:0; padding-top:8px; border-top:1px solid #3f3f3f; margin-top:4px; }
+    .io-panel-title { font-size:0.65rem; letter-spacing:0.5px; text-transform:uppercase; color:#8e8ea0; margin-bottom:4px; }
+    .io-item { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid #2a2a2a; }
+    .io-item:last-child { border-bottom:none; }
+    .io-name-input {
+      flex:1; min-width:0; background:transparent; border:1px solid transparent;
+      color:#ececec; font-size:0.82rem; outline:none; padding:3px 6px; border-radius:4px;
+      transition:border-color 0.15s,background 0.15s;
+    }
+    .io-name-input:focus { background:#2a2a2a; border-color:#555; }
+    .io-toggle {
+      flex-shrink:0; min-width:46px; padding:5px 6px; border-radius:6px;
+      border:1px solid #3f3f3f; background:#212121; color:#8e8ea0;
+      font-size:0.72rem; font-weight:600; cursor:pointer; transition:all 0.15s; text-align:center;
+    }
+    .io-toggle.on { background:rgba(16,163,127,0.18); border-color:#10a37f; color:#10a37f; }
+    .io-toggle:active { opacity:0.7; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+
+    <div class="top-bar">
+      <h1>&#129302; Robot Control Center</h1>
+    </div>
+
+    <div class="main">
+
+      <!-- Stream panel -->
+      <div class="stream-panel">
+        <video id="stream-video" autoplay muted playsinline></video>
+
+        <!-- Top-left: rotate video display -->
+        <div class="ov-tl">
+          <button id="btn-rot-ccw" class="ov-btn" title="Rotate 90&#176; left">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.71"/></svg>
+          </button>
+          <button id="btn-rot-cw" class="ov-btn" title="Rotate 90&#176; right">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-4.71"/></svg>
+          </button>
+        </div>
+
+        <!-- Bottom-right: speaker + mic, icon only, popup on click -->
+        <div class="ov-br">
+
+          <!-- Speaker: popup has mute toggle + volume slider -->
+          <div class="ov-item" id="ov-spk">
+            <div class="ov-popup" id="pop-spk">
+              <button class="ov-mute-btn" id="btn-spk-mute" title="Mute / Unmute car audio"></button>
+              <input type="range" id="rng-spk" class="ov-range" min="0" max="1" step="0.05" value="1" title="Volume — car audio to you">
+            </div>
+            <button class="ov-btn" id="btn-spk" title="Car speaker settings"></button>
+          </div>
+
+          <!-- Mic: popup has gain slider -->
+          <div class="ov-item" id="ov-mic">
+            <div class="ov-popup" id="pop-mic">
+              <input type="range" id="rng-mic" class="ov-range" min="0" max="2" step="0.1" value="1" title="Mic gain — how loud your voice is on the car">
+            </div>
+            <button class="ov-btn" id="btn-mic" title="Microphone — send voice to car"></button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Side panel -->
+      <div class="side-panel">
+
+        <div class="status-card">
+          <div class="card-title"><span class="cam-dot" id="cam-dot"></span> Stream Status</div>
+          <div class="status-row">
+            <div class="stat">
+              <div class="stat-label">Resolution</div>
+              <select id="sel-res" class="stat-sel">
+                <option value="320,240">320x240</option>
+                <option value="640,480" selected>640x480</option>
+              </select>
+            </div>
+            <div class="stat">
+              <div class="stat-label">FPS</div>
+              <select id="sel-fps" class="stat-sel">
+                <option value="5">5</option>
+                <option value="10">10</option>
+                <option value="15">15</option>
+                <option value="20" selected>20</option>
+                <option value="25">25</option>
+                <option value="30">30</option>
+              </select>
+            </div>
+            <div class="stat">
+              <div class="stat-label">&#8593; TX</div>
+              <div class="stat-value" id="status-tx">&#8212;</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">&#8595; RX</div>
+              <div class="stat-value" id="status-rx">&#8212;</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="control-card">
+          <div class="card-title">&#127950; Drive Controls</div>
+          <div class="control-inner" id="control-inner">
+
+            <div class="joystick-wrapper">
+              <div class="dir-display" id="dir-display">IDLE</div>
+              <div class="joystick-track" id="joystick-track">
+                <div class="joystick-knob" id="joystick-knob"></div>
+              </div>
+              <div class="joy-footer">
+                <div class="speed-badge">Max: <span id="speed-label">10</span>/10</div>
+                <div class="current-speed">Speed: <span id="cur-speed">0%</span></div>
+              </div>
+            </div>
+
+            <div class="io-panel">
+              <div class="io-panel-title">&#128268; I/O Controls</div>
+              <div id="io-list"></div>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+
+    /* ── SVG icons ── */
+    const ICO = {
+      spkOn:  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+      spkMute:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>',
+      micOn:  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>',
+      micOff: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2"/><path d="M19 10v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>',
+    };
+
+    const streamVideo = document.getElementById("stream-video");
+    const camDot      = document.getElementById("cam-dot");
+    let webrtcPc = null, wasDown = false;
+
+    /* ── Helpers ── */
+    function setRangeFill(inp, active) {
+      const pct = ((parseFloat(inp.value) - parseFloat(inp.min)) /
+                   (parseFloat(inp.max)  - parseFloat(inp.min))) * 100;
+      inp.style.setProperty("--pct", pct + "%");
+      inp.classList.toggle("lit", active);
+    }
+
+    function closeAllPopups() {
+      document.querySelectorAll(".ov-item.open").forEach(el => el.classList.remove("open"));
+    }
+
+    /* Close popups when tapping outside the overlay */
+    document.addEventListener("pointerdown", e => {
+      if (!e.target.closest(".ov-item") && !e.target.closest(".ov-tl")) closeAllPopups();
+    }, { capture: true });
+
+    /* ── WebRTC WHEP — receive car video + car-side audio ── */
+    async function startMediaMTX() {
+      if (!window.RTCPeerConnection) return;
+      const url = "http://" + location.hostname + ":8889/robot/whep";
+      for (let i = 0; i < 6; i++) {
+        if (i) await new Promise(r => setTimeout(r, 2000));
+        try {
+          if (webrtcPc) { webrtcPc.close(); webrtcPc = null; }
+          webrtcPc = new RTCPeerConnection();
+          webrtcPc.ontrack = e => { if (e.streams && e.streams[0]) streamVideo.srcObject = e.streams[0]; };
+          webrtcPc.addTransceiver("video", { direction: "recvonly" });
+          webrtcPc.addTransceiver("audio", { direction: "recvonly" });
+          const offer = await webrtcPc.createOffer();
+          await webrtcPc.setLocalDescription(offer);
+          const resp = await fetch("/proxy/whep", { method: "POST", headers: { "Content-Type": "application/sdp" }, body: offer.sdp });
+          if (!resp.ok) throw new Error("WHEP " + resp.status);
+          await webrtcPc.setRemoteDescription({ type: "answer", sdp: await resp.text() });
+          return;
+        } catch (e) {
+          console.warn("WHEP attempt", i + 1, e);
+          if (webrtcPc) { webrtcPc.close(); webrtcPc = null; }
+        }
+      }
+    }
+
+    /* ── SPEAKER — hear what the car hears (WHEP stream audio) ──
+       btn-spk  : opens / closes the popup
+       btn-spk-mute : toggles mute without closing popup
+       rng-spk  : controls streamVideo.volume (0–1)
+    ── */
+    const btnSpk     = document.getElementById("btn-spk");
+    const btnSpkMute = document.getElementById("btn-spk-mute");
+    const rngSpk     = document.getElementById("rng-spk");
+    const ovSpk      = document.getElementById("ov-spk");
+    let spkMuted = true, lastSpkVol = 1.0;
+
+    function renderSpk() {
+      streamVideo.muted  = spkMuted;
+      streamVideo.volume = spkMuted ? 0 : lastSpkVol;
+      /* main icon always shows whether audio is currently active */
+      btnSpk.innerHTML = spkMuted ? ICO.spkMute : ICO.spkOn;
+      btnSpk.classList.toggle("active", !spkMuted);
+      /* inner mute button: shows current state, acts as toggle */
+      btnSpkMute.innerHTML = spkMuted ? ICO.spkOn : ICO.spkMute;
+      btnSpkMute.title = spkMuted ? "Unmute car audio" : "Mute car audio";
+      btnSpkMute.classList.toggle("active", !spkMuted);
+      rngSpk.value = spkMuted ? 0 : lastSpkVol;
+      setRangeFill(rngSpk, !spkMuted);
+    }
+
+    /* Main icon click = open/close popup */
+    btnSpk.addEventListener("click", e => {
+      e.stopPropagation();
+      const wasOpen = ovSpk.classList.contains("open");
+      closeAllPopups();
+      if (!wasOpen) ovSpk.classList.add("open");
+    });
+
+    /* Mute button inside popup */
+    btnSpkMute.addEventListener("click", e => {
+      e.stopPropagation();
+      spkMuted = !spkMuted;
+      if (!spkMuted) rngSpk.value = lastSpkVol;
+      renderSpk();
+    });
+
+    /* Volume slider */
+    rngSpk.addEventListener("input", () => {
+      const v = parseFloat(rngSpk.value);
+      if (v > 0) { lastSpkVol = v; spkMuted = false; } else { spkMuted = true; }
+      renderSpk();
+    });
+
+    /* ── MICROPHONE — send your voice to the car (WHIP) ──
+       btn-mic : start mic + open popup  /  stop mic + close popup
+       rng-mic : controls GainNode (0–2×) — how loud you are heard on the car
+    ── */
+    const btnMic = document.getElementById("btn-mic");
+    const rngMic = document.getElementById("rng-mic");
+    const ovMic  = document.getElementById("ov-mic");
+    let micPc = null, micStream = null, micOn = false, micPending = false;
+    let audioCtx = null, gainNode = null;
+
+    function renderMic() {
+      btnMic.innerHTML = micOn ? ICO.micOn : ICO.micOff;
+      btnMic.classList.toggle("active",  micOn);
+      btnMic.classList.toggle("pending", micPending);
+      setRangeFill(rngMic, micOn);
+    }
+
+    rngMic.addEventListener("input", () => {
+      if (gainNode) gainNode.gain.value = parseFloat(rngMic.value);
+      setRangeFill(rngMic, micOn);
+    });
+
+    async function startMic() {
+      if (micPending) return;
+      micPending = true; renderMic();
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+          video: false,
+        });
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        gainNode  = audioCtx.createGain();
+        gainNode.gain.value = parseFloat(rngMic.value);
+        const src  = audioCtx.createMediaStreamSource(micStream);
+        const dest = audioCtx.createMediaStreamDestination();
+        src.connect(gainNode); gainNode.connect(dest);
+
+        micPc = new RTCPeerConnection();
+        dest.stream.getTracks().forEach(t => micPc.addTrack(t, dest.stream));
+        const offer = await micPc.createOffer();
+        await micPc.setLocalDescription(offer);
+
+        await new Promise(resolve => {
+          if (micPc.iceGatheringState === "complete") { resolve(); return; }
+          const tid = setTimeout(resolve, 3000);
+          micPc.addEventListener("icegatheringstatechange", () => {
+            if (micPc.iceGatheringState === "complete") { clearTimeout(tid); resolve(); }
+          });
+        });
+
+        const resp = await fetch("/proxy/whip", {
+          method: "POST", headers: { "Content-Type": "application/sdp" },
+          body: micPc.localDescription.sdp,
+        });
+        if (!resp.ok) throw new Error("WHIP " + resp.status);
+        await micPc.setRemoteDescription({ type: "answer", sdp: await resp.text() });
+        micOn = true;
+        ovMic.classList.add("open");
+      } catch (err) {
+        console.error("Mic failed:", err);
+        let msg = "Mic error";
+        if (err.name === "NotAllowedError")  msg = "Mic blocked — check browser permissions";
+        else if (err.name === "NotFoundError")   msg = "No microphone found";
+        else if (err.name === "SecurityError" || location.protocol !== "https:") msg = "HTTPS required for mic access";
+        else msg = err.message || String(err);
+        showToast(msg, 4000);
+        _cleanupMic();
+      } finally {
+        micPending = false; renderMic();
+      }
+    }
+
+    function _cleanupMic() {
+      if (micPc)     { micPc.close(); micPc = null; }
+      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      if (audioCtx)  { audioCtx.close().catch(()=>{}); audioCtx = null; gainNode = null; }
+      micOn = false;
+    }
+
+    function stopMic() { _cleanupMic(); ovMic.classList.remove("open"); renderMic(); }
+
+    btnMic.addEventListener("click", e => {
+      e.stopPropagation();
+      if (micPending) return;
+      micOn ? stopMic() : startMic();
+    });
+
+    /* ── VIDEO ROTATION — rotate the displayed feed ── */
+    let rotDeg = 0;
+    let _rotRestored = false;
+
+    function applyRotation() {
+      const panel = streamVideo.parentElement;
+      const sw = panel.clientWidth || 1, sh = panel.clientHeight || 1;
+      if (rotDeg === 90 || rotDeg === 270) {
+        const s = (Math.min(sw, sh) / Math.max(sw, sh)).toFixed(3);
+        streamVideo.style.transform = "rotate(" + rotDeg + "deg) scale(" + s + ")";
+      } else if (rotDeg === 180) {
+        streamVideo.style.transform = "rotate(180deg)";
+      } else {
+        streamVideo.style.transform = "";
+      }
+    }
+
+    function saveRotation() {
+      fetch("/api/rotation", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rotation: rotDeg }),
+      }).catch(() => {});
+    }
+
+    document.getElementById("btn-rot-ccw").addEventListener("click", () => {
+      rotDeg = (rotDeg - 90 + 360) % 360; applyRotation(); saveRotation();
+    });
+    document.getElementById("btn-rot-cw").addEventListener("click", () => {
+      rotDeg = (rotDeg + 90) % 360; applyRotation(); saveRotation();
+    });
+    window.addEventListener("resize", () => { if (rotDeg) applyRotation(); });
+
+    /* ── Resolution / FPS dropdowns ── */
+    const selRes = document.getElementById("sel-res");
+    const selFps = document.getElementById("sel-fps");
+    let applyTimer = null;
+    function applySetting() {
+      clearTimeout(applyTimer);
+      applyTimer = setTimeout(() => {
+        const [w, h] = selRes.value.split(",").map(Number);
+        fetch("/api/update_settings", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resolution: [w, h], fps: parseInt(selFps.value) }),
+        }).catch(()=>{});
+      }, 600);
+    }
+    selRes.addEventListener("change", applySetting);
+    selFps.addEventListener("change", applySetting);
+
+    /* ── I/O Controls ── */
+    function renderIO(devices) {
+      devices.forEach((dev, i) => {
+        let item = document.getElementById("io-item-" + i);
+        if (!item) {
+          item = document.createElement("div");
+          item.className = "io-item"; item.id = "io-item-" + i;
+          const inp = document.createElement("input");
+          inp.className = "io-name-input"; inp.id = "io-name-" + i;
+          inp.value = dev.name; inp.placeholder = "Device " + (i + 1);
+          inp.addEventListener("change", () => {
+            fetch("/api/io_rename", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ index: i, name: inp.value.trim() }),
+            }).catch(()=>{});
+          });
+          const btn = document.createElement("button");
+          btn.className = "io-toggle" + (dev.state ? " on" : "");
+          btn.id = "io-btn-" + i; btn.textContent = dev.state ? "ON" : "OFF";
+          btn.addEventListener("click", () => toggleIO(i));
+          item.appendChild(inp); item.appendChild(btn);
+          document.getElementById("io-list").appendChild(item);
+        } else {
+          const inp = document.getElementById("io-name-" + i);
+          if (inp && document.activeElement !== inp) inp.value = dev.name;
+          const btn = document.getElementById("io-btn-" + i);
+          if (btn) { btn.className = "io-toggle"+(dev.state?" on":""); btn.textContent = dev.state?"ON":"OFF"; }
+        }
+      });
+    }
+
+    function toggleIO(idx) {
+      fetch("/api/io_toggle", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: idx }),
+      }).then(r=>r.json()).then(d => {
+        if (d.status !== "ok") return;
+        const btn = document.getElementById("io-btn-" + d.index);
+        if (btn) { btn.className="io-toggle"+(d.state?" on":""); btn.textContent=d.state?"ON":"OFF"; }
+      }).catch(()=>{});
+    }
+
+    /* ── Status polling ── */
+    function updateStatus() {
+      fetch("/api/status").then(r=>r.json()).then(data => {
+        if (document.activeElement !== selRes) selRes.value = data.resolution[0]+","+data.resolution[1];
+        if (document.activeElement !== selFps) selFps.value = String(data.fps);
+        /* Restore rotation once on first successful poll */
+        if (!_rotRestored && data.rotation != null) {
+          _rotRestored = true;
+          rotDeg = data.rotation;
+          applyRotation();
+        }
+        const txEl = document.getElementById("status-tx");
+        const rxEl = document.getElementById("status-rx");
+        if (txEl) txEl.textContent = data.net_tx_kbps != null ? Math.round(data.net_tx_kbps/8)+" kB/s" : "N/A";
+        if (rxEl) rxEl.textContent = data.net_rx_kbps != null ? Math.round(data.net_rx_kbps/8)+" kB/s" : "N/A";
+        if (data.io_devices) renderIO(data.io_devices);
+        if (data.camera_ok) {
+          camDot.className = "cam-dot ok";
+          if (wasDown) { wasDown = false; startMediaMTX(); }
+        } else { camDot.className = "cam-dot err"; wasDown = true; }
+      }).catch(() => { camDot.className = "cam-dot err"; });
+    }
+    updateStatus();
+    setInterval(updateStatus, 3000);
+
+    /* ── Joystick ── */
+    const track = document.getElementById("joystick-track");
+    const knob  = document.getElementById("joystick-knob");
+    const dirEl = document.getElementById("dir-display");
+    let dragging = false, trackR = 0, knobR = 0, maxDist = 0;
+    let sendTimer = null, lastX = 0, lastY = 0;
+
+    function sizeJoystick() {
+      let size = window.innerWidth <= 768
+        ? Math.max(120, Math.min(165, window.innerWidth * 0.38))
+        : Math.max(100, Math.min(track.parentElement.clientWidth - 24, 200));
+      track.style.width = size+"px"; track.style.height = size+"px";
+      trackR = size/2; knobR = (size*0.24)/2; maxDist = trackR-knobR;
+    }
+
+    function dirLabel(x, y) {
+      if (Math.abs(x) < 0.15 && Math.abs(y) < 0.15) return "IDLE";
+      const p = [];
+      if (y >  0.15) p.push("<span>FORWARD</span>");
+      if (y < -0.15) p.push("<span>REVERSE</span>");
+      if (x < -0.15) p.push("<span>LEFT</span>");
+      if (x >  0.15) p.push("<span>RIGHT</span>");
+      return p.join(" + ");
+    }
+
+    const curSpeedEl = document.getElementById("cur-speed");
+
+    function moveKnob(cx, cy) {
+      const rect = track.getBoundingClientRect();
+      let dx = cx - (rect.left+trackR), dy = cy - (rect.top+trackR);
+      const dist = Math.hypot(dx, dy);
+      if (dist > maxDist) { dx = dx/dist*maxDist; dy = dy/dist*maxDist; }
+      knob.style.left = (trackR+dx)+"px"; knob.style.top = (trackR+dy)+"px";
+      lastX = dx/maxDist; lastY = -dy/maxDist;
+      dirEl.innerHTML = dirLabel(lastX, lastY);
+      curSpeedEl.textContent = Math.round(Math.min(1,Math.hypot(lastX,lastY))*(parseInt(document.getElementById("speed-label").textContent)||10)*10)+"%";
+    }
+
+    function resetKnob() {
+      knob.style.left = trackR+"px"; knob.style.top = trackR+"px";
+      lastX = lastY = 0; dirEl.innerHTML = "IDLE"; curSpeedEl.textContent = "0%";
+      fetch("/api/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({x:0,y:0})}).catch(()=>{});
+    }
+
+    function scheduleSend() {
+      if (sendTimer) return;
+      sendTimer = setTimeout(() => {
+        sendTimer = null;
+        if (dragging) fetch("/api/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({x:lastX,y:lastY})}).catch(()=>{});
+      }, 50);
+    }
+
+    track.addEventListener("pointerdown", e => { dragging=true; knob.classList.add("active"); track.setPointerCapture(e.pointerId); sizeJoystick(); moveKnob(e.clientX,e.clientY); scheduleSend(); });
+    track.addEventListener("pointermove", e => { if (!dragging) return; moveKnob(e.clientX,e.clientY); scheduleSend(); });
+    track.addEventListener("pointerup",     () => { dragging=false; knob.classList.remove("active"); resetKnob(); });
+    track.addEventListener("pointercancel", () => { dragging=false; knob.classList.remove("active"); resetKnob(); });
+    window.addEventListener("resize", () => { sizeJoystick(); if (!dragging) resetKnob(); });
+
+    /* ── Toast notification ── */
+    let _toastTimer = null;
+    function showToast(msg, ms) {
+      let t = document.getElementById("toast");
+      if (!t) {
+        t = document.createElement("div");
+        t.id = "toast";
+        t.style.cssText = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:9px 16px;border-radius:8px;font-size:0.82rem;z-index:9999;pointer-events:none;transition:opacity 0.3s";
+        document.body.appendChild(t);
+      }
+      t.textContent = msg; t.style.opacity = "1";
+      clearTimeout(_toastTimer);
+      _toastTimer = setTimeout(() => { t.style.opacity = "0"; }, ms || 3000);
+    }
+
+    /* ── Init ── */
+    window.addEventListener("load", () => {
+      sizeJoystick(); resetKnob();
+      renderSpk(); renderMic();
+      startMediaMTX();
+    });
+  </script>
+</body>
+</html>

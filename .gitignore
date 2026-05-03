@@ -1,0 +1,18 @@
+# Logs
+*.log
+
+# TLS certificates (auto-generated at runtime)
+cert.pem
+key.pem
+
+# MediaMTX binary (download separately)
+mediamtx/mediamtx
+
+# Runtime-generated config
+mediamtx_run.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env

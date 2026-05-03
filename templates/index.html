@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Robot Stream — 2 chiều</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111;
+      color: #e0e0e0;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 12px 40px;
+      gap: 16px;
+    }
+    h1 { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    .subtitle { font-size: 0.8rem; color: #666; }
+
+    /* ── Status ──────────────────────────────────────────── */
+    #status-bar {
+      display: flex; align-items: center; gap: 10px;
+      background: #1c1c1c; border: 1px solid #2a2a2a;
+      border-radius: 8px; padding: 8px 14px;
+      font-size: 0.82rem; width: 100%; max-width: 860px;
+    }
+    #dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #444; flex-shrink: 0; transition: background .3s;
+    }
+    #dot.idle      { background: #555; }
+    #dot.loading   { background: #f5a623; animation: blink 1s infinite; }
+    #dot.connected { background: #10a37f; }
+    #dot.error     { background: #e53e3e; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    #status-msg { flex: 1; }
+
+    /* ── Video grid ─────────────────────────────────────── */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      width: 100%; max-width: 860px;
+    }
+    @media (max-width: 580px) { .grid { grid-template-columns: 1fr; } }
+
+    .card {
+      background: #000; border: 1px solid #222;
+      border-radius: 10px; overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .card-header {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #181818; border-bottom: 1px solid #222;
+      font-size: 0.75rem; font-weight: 600; color: #999;
+      text-transform: uppercase; letter-spacing: .06em;
+    }
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #333; transition: background .3s;
+    }
+    .live-dot.live { background: #e53e3e; animation: blink 1.5s infinite; }
+    video {
+      width: 100%; aspect-ratio: 4/3;
+      object-fit: cover; display: block; background: #000;
+    }
+    #local-video { transform: scaleX(-1); }
+
+    /* ── Controls ───────────────────────────────────────── */
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      justify-content: center; width: 100%; max-width: 860px;
+    }
+    button {
+      padding: 10px 20px; border: none; border-radius: 7px;
+      font-size: 0.88rem; font-weight: 600; cursor: pointer;
+      transition: background .2s, opacity .2s;
+    }
+    button:disabled { opacity: .35; cursor: default; }
+    #btn-watch  { background: #10a37f; color: #fff; }
+    #btn-watch:hover:not(:disabled) { background: #0c8f6e; }
+    #btn-talk   { background: #3b6bcc; color: #fff; }
+    #btn-talk:hover:not(:disabled)  { background: #2f58aa; }
+    #btn-stop   { background: #e53e3e; color: #fff; display: none; }
+    #btn-stop:hover:not(:disabled)  { background: #c53030; }
+    #btn-mute   { background: #2a2a2a; color: #ccc; }
+    #btn-mute:hover:not(:disabled)  { background: #333; }
+    button.active { background: #5a1f1f !important; color: #ffaaaa !important; }
+
+    /* ── Stats ───────────────────────────────────────────── */
+    #stats {
+      display: flex; flex-wrap: wrap; gap: 14px;
+      justify-content: center; font-size: 0.76rem;
+      color: #555; width: 100%; max-width: 860px;
+    }
+    .stat { display: flex; gap: 5px; }
+    .sl { color: #444; }
+    .sv { color: #10a37f; font-weight: 600; }
+
+    /* ── Log ─────────────────────────────────────────────── */
+    #log {
+      width: 100%; max-width: 860px;
+      background: #0d0d0d; border: 1px solid #222;
+      border-radius: 8px; padding: 10px 12px;
+      font-family: ui-monospace, monospace;
+      font-size: 0.72rem; color: #555;
+      height: 100px; overflow-y: auto;
+    }
+    .li { color: #60a5fa; }
+    .lo { color: #10a37f; }
+    .lw { color: #f5a623; }
+    .le { color: #e53e3e; }
+  </style>
+</head>
+<body>
+
+<h1>Robot Stream</h1>
+<p class="subtitle">Video + Âm thanh 2 chiều — MediaMTX / WebRTC</p>
+
+<div id="status-bar">
+  <div id="dot" class="idle"></div>
+  <span id="status-msg">Nhấn "Xem Video" để kết nối.</span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="card-header">
+      <span>Pi Camera (từ Robot)</span>
+      <span class="live-dot" id="dot-remote"></span>
+    </div>
+    <video id="remote-video" autoplay playsinline></video>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span>Mic của bạn (gửi xuống Robot)</span>
+      <span class="live-dot" id="dot-local"></span>
+    </div>
+    <!-- Canvas hiển thị waveform mic -->
+    <canvas id="waveform" style="width:100%;aspect-ratio:4/3;background:#000;display:block;"></canvas>
+  </div>
+</div>
+
+<div class="controls">
+  <button id="btn-watch">▶ Xem Video</button>
+  <button id="btn-talk" disabled>🎙 Bật Micro → Robot</button>
+  <button id="btn-mute" disabled>🔇 Tắt Mic</button>
+  <button id="btn-stop">■ Ngắt kết nối</button>
+</div>
+
+<div id="stats">
+  <div class="stat"><span class="sl">Trạng thái:</span><span class="sv" id="st-conn">—</span></div>
+  <div class="stat"><span class="sl">ICE:</span><span class="sv" id="st-ice">—</span></div>
+  <div class="stat"><span class="sl">Nhận video:</span><span class="sv" id="st-rxv">—</span></div>
+  <div class="stat"><span class="sl">Nhận audio:</span><span class="sv" id="st-rxa">—</span></div>
+  <div class="stat"><span class="sl">Gửi audio:</span><span class="sv" id="st-txa">—</span></div>
+</div>
+
+<div id="log"></div>
+
+<script>
+"use strict";
+
+// ── Config ────────────────────────────────────────────────────
+// Tự động lấy hostname:port của trang web hiện tại
+const HOST      = location.hostname;
+const WATCH_URL = `http://${HOST}:8889/robot`;       // xem video từ robot
+const TALK_URL  = `http://${HOST}:8889/from-browser`; // gửi mic xuống robot
+const STUN      = { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] };
+
+// ── DOM ───────────────────────────────────────────────────────
+const remoteVideo = document.getElementById("remote-video");
+const waveCanvas  = document.getElementById("waveform");
+const btnWatch    = document.getElementById("btn-watch");
+const btnTalk     = document.getElementById("btn-talk");
+const btnMute     = document.getElementById("btn-mute");
+const btnStop     = document.getElementById("btn-stop");
+const dot         = document.getElementById("dot");
+const statusMsg   = document.getElementById("status-msg");
+const dotRemote   = document.getElementById("dot-remote");
+const dotLocal    = document.getElementById("dot-local");
+const stConn      = document.getElementById("st-conn");
+const stIce       = document.getElementById("st-ice");
+const stRxV       = document.getElementById("st-rxv");
+const stRxA       = document.getElementById("st-rxa");
+const stTxa       = document.getElementById("st-txa");
+const logEl       = document.getElementById("log");
+
+// ── State ─────────────────────────────────────────────────────
+let watchPc    = null;
+let talkPc     = null;
+let micStream  = null;
+let audioCtx   = null;
+let analyser   = null;
+let waveAnim   = null;
+let statsTimer = null;
+
+// ── Log ───────────────────────────────────────────────────────
+function log(msg, cls = "li") {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(d);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(state, msg) {
+  dot.className = state;
+  statusMsg.textContent = msg;
+}
+
+// ── WebRTC helpers ────────────────────────────────────────────
+function makePc() {
+  return new RTCPeerConnection({ iceServers: [STUN], sdpSemantics: "unified-plan" });
+}
+
+function waitGathering(pc) {
+  return new Promise(resolve => {
+    if (pc.iceGatheringState === "complete") { resolve(); return; }
+    const h = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", h); resolve(); } };
+    pc.addEventListener("icegatheringstatechange", h);
+    setTimeout(resolve, 5000); // safety
+  });
+}
+
+// MediaMTX WHEP (watch) handshake
+async function whepConnect(url, pc) {
+  // Create offer that only receives
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addTransceiver("audio", { direction: "recvonly" });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitGathering(pc);
+
+  const resp = await fetch(url + "/whep", {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: pc.localDescription.sdp,
+  });
+  if (!resp.ok) throw new Error(`WHEP ${resp.status}: ${await resp.text()}`);
+  const answerSdp = await resp.text();
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  log(`WHEP handshake OK → ${url}`, "lo");
+}
+
+// MediaMTX WHIP (publish) handshake
+async function whipConnect(url, pc) {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await waitGathering(pc);
+
+  const resp = await fetch(url + "/whip", {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: pc.localDescription.sdp,
+  });
+  if (!resp.ok) throw new Error(`WHIP ${resp.status}: ${await resp.text()}`);
+  const answerSdp = await resp.text();
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  log(`WHIP handshake OK → ${url}`, "lo");
+}
+
+// ── Watch (Robot → Browser) ───────────────────────────────────
+async function startWatch() {
+  btnWatch.disabled = true;
+  setStatus("loading", "Đang kết nối tới Robot Camera...");
+  log("Kết nối xem video từ Robot...");
+
+  watchPc = makePc();
+  watchPc.ontrack = ({ track, streams }) => {
+    log(`Nhận ${track.kind} track từ Robot`, "lo");
+    remoteVideo.srcObject = streams[0] || new MediaStream([track]);
+    dotRemote.classList.add("live");
+  };
+  watchPc.onconnectionstatechange = () => {
+    stConn.textContent = watchPc.connectionState;
+    log(`Watch state: ${watchPc.connectionState}`);
+    if (watchPc.connectionState === "connected") {
+      setStatus("connected", "Đã kết nối — đang xem video Robot");
+      btnStop.style.display = "inline-block";
+      btnTalk.disabled = false;
+      startStats();
+    }
+    if (["failed","closed","disconnected"].includes(watchPc.connectionState))
+      setStatus("error", `Mất kết nối: ${watchPc.connectionState}`);
+  };
+  watchPc.oniceconnectionstatechange = () => {
+    stIce.textContent = watchPc.iceConnectionState;
+  };
+
+  try {
+    await whepConnect(WATCH_URL, watchPc);
+  } catch (err) {
+    log(`Lỗi kết nối watch: ${err.message}`, "le");
+    setStatus("error", err.message);
+    watchPc.close(); watchPc = null;
+    btnWatch.disabled = false;
+  }
+}
+
+// ── Talk (Browser Mic → Robot) ────────────────────────────────
+async function startTalk() {
+  btnTalk.disabled = true;
+  log("Xin quyền dùng Microphone...");
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 44100 },
+      video: false,
+    });
+    log("Được cấp quyền Microphone", "lo");
+    dotLocal.classList.add("live");
+    startWaveform();
+  } catch (err) {
+    log(`Không lấy được mic: ${err.message}`, "le");
+    btnTalk.disabled = false;
+    return;
+  }
+
+  talkPc = makePc();
+  micStream.getTracks().forEach(t => talkPc.addTrack(t, micStream));
+
+  talkPc.onconnectionstatechange = () => {
+    log(`Talk state: ${talkPc.connectionState}`);
+    if (talkPc.connectionState === "connected") {
+      log("Mic đang gửi âm thanh xuống Robot!", "lo");
+      btnMute.disabled = false;
+      setStatus("connected", "Đang kết nối — video + âm thanh 2 chiều");
+    }
+  };
+
+  try {
+    await whipConnect(TALK_URL, talkPc);
+  } catch (err) {
+    log(`Lỗi kết nối talk: ${err.message}`, "le");
+    stopTalk();
+    btnTalk.disabled = false;
+  }
+}
+
+function stopTalk() {
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (talkPc)    { talkPc.close(); talkPc = null; }
+  stopWaveform();
+  dotLocal.classList.remove("live");
+  btnMute.disabled = true;
+  btnMute.classList.remove("active");
+  btnMute.textContent = "🔇 Tắt Mic";
+  stTxa.textContent = "—";
+}
+
+// ── Stop all ──────────────────────────────────────────────────
+function stopAll() {
+  stopTalk();
+  stopStats();
+  if (watchPc) { watchPc.close(); watchPc = null; }
+  remoteVideo.srcObject = null;
+  dotRemote.classList.remove("live");
+  btnWatch.disabled = false;
+  btnTalk.disabled  = true;
+  btnStop.style.display = "none";
+  stConn.textContent = "—"; stIce.textContent = "—";
+  stRxV.textContent  = "—"; stRxA.textContent = "—";
+  setStatus("idle", "Đã ngắt — nhấn Xem Video để kết nối lại.");
+  log("Đã ngắt kết nối.", "lw");
+}
+
+// ── Mic mute toggle ───────────────────────────────────────────
+btnMute.addEventListener("click", () => {
+  if (!micStream) return;
+  const t = micStream.getAudioTracks()[0];
+  if (!t) return;
+  t.enabled = !t.enabled;
+  const muted = !t.enabled;
+  btnMute.textContent = muted ? "🔊 Bật lại Mic" : "🔇 Tắt Mic";
+  btnMute.classList.toggle("active", muted);
+  log(muted ? "Mic đã tắt" : "Mic đã bật", "lw");
+});
+
+btnWatch.addEventListener("click", startWatch);
+btnTalk.addEventListener("click",  startTalk);
+btnStop.addEventListener("click",  stopAll);
+
+// ── Stats ─────────────────────────────────────────────────────
+async function collectStats() {
+  if (watchPc) {
+    const r = await watchPc.getStats().catch(() => null);
+    if (r) r.forEach(s => {
+      if (s.type === "inbound-rtp" && s.kind === "video")
+        stRxV.textContent = s.bytesReceived != null ? (s.bytesReceived/1024).toFixed(1)+" KB" : "—";
+      if (s.type === "inbound-rtp" && s.kind === "audio")
+        stRxA.textContent = s.bytesReceived != null ? (s.bytesReceived/1024).toFixed(1)+" KB" : "—";
+    });
+  }
+  if (talkPc) {
+    const r = await talkPc.getStats().catch(() => null);
+    if (r) r.forEach(s => {
+      if (s.type === "outbound-rtp" && s.kind === "audio")
+        stTxa.textContent = s.bytesSent != null ? (s.bytesSent/1024).toFixed(1)+" KB" : "—";
+    });
+  }
+}
+function startStats() { statsTimer = setInterval(collectStats, 2000); }
+function stopStats()  { if (statsTimer) { clearInterval(statsTimer); statsTimer = null; } }
+
+// ── Waveform visualiser ───────────────────────────────────────
+function startWaveform() {
+  if (!micStream) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  audioCtx.createMediaStreamSource(micStream).connect(analyser);
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  const ctx2 = waveCanvas.getContext("2d");
+
+  function draw() {
+    waveAnim = requestAnimationFrame(draw);
+    const w = waveCanvas.offsetWidth; waveCanvas.width = w;
+    const h = waveCanvas.offsetHeight || 240; waveCanvas.height = h;
+    analyser.getByteTimeDomainData(buf);
+    ctx2.fillStyle = "#000"; ctx2.fillRect(0,0,w,h);
+    ctx2.strokeStyle = "#10a37f"; ctx2.lineWidth = 2;
+    ctx2.beginPath();
+    const sliceW = w / buf.length;
+    let x = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const y = (buf[i] / 128.0) * (h / 2);
+      i === 0 ? ctx2.moveTo(x, y) : ctx2.lineTo(x, y);
+      x += sliceW;
+    }
+    ctx2.lineTo(w, h/2); ctx2.stroke();
+  }
+  draw();
+}
+function stopWaveform() {
+  if (waveAnim) { cancelAnimationFrame(waveAnim); waveAnim = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  analyser = null;
+  const ctx2 = waveCanvas.getContext("2d");
+  ctx2.fillStyle = "#000";
+  ctx2.fillRect(0, 0, waveCanvas.width, waveCanvas.height);
+}
+
+log("Trang đã tải — sẵn sàng kết nối Robot!");
+</script>
+</body>
+</html>
