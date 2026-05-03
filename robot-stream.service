@@ -1,0 +1,18 @@
+[Unit]
+Description=Robot Stream App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/robot-stream-2
+ExecStart=/usr/bin/python3 /home/pi/robot-stream-2/app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/pi/robot-stream-2/server.log
+StandardError=append:/home/pi/robot-stream-2/server.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
