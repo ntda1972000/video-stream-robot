@@ -160,14 +160,16 @@
       flex: 1; min-width: 0; container-type: inline-size;
       background: #212121; border: 1px solid #3f3f3f;
       border-radius: 6px; padding: 5px 4px; text-align: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 44px;
     }
-    .stat-label { font-size: 9cqi; text-transform: uppercase; letter-spacing: 0.4px; color: #565869; margin-bottom: 2px; }
-    .stat-value { font-size: 14cqi; font-weight: 600; color: #10a37f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat-label { font-size: 9cqi; text-transform: uppercase; letter-spacing: 0.4px; color: #565869; margin-bottom: 3px; line-height: 1.2; }
+    .stat-value { font-size: 14cqi; font-weight: 600; color: #10a37f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
     .stat-sel {
       width: 100%; background: transparent; border: none; color: #10a37f;
-      font-size: 13cqi; font-weight: 600; cursor: pointer; outline: none;
+      font-size: 14cqi; font-weight: 600; cursor: pointer; outline: none;
       text-align: center; text-align-last: center;
-      -webkit-appearance: none; appearance: none; padding: 0;
+      -webkit-appearance: none; appearance: none; padding: 0; line-height: 1.2;
     }
     .stat-sel option { background: #2a2a2a; color: #ececec; }
 
@@ -363,6 +365,21 @@
     const streamVideo = document.getElementById("stream-video");
     const camDot      = document.getElementById("cam-dot");
     let webrtcPc = null, wasDown = false;
+    let streamPlaying = false;
+
+    /* ── Derive dot state from both video playback and server health ── */
+    function refreshDot(serverOk) {
+      if (streamPlaying || serverOk) {
+        camDot.className = "cam-dot ok";
+      } else {
+        camDot.className = "cam-dot err";
+      }
+    }
+
+    streamVideo.addEventListener("playing", () => { streamPlaying = true;  refreshDot(false); });
+    ["pause", "emptied", "ended", "stalled"].forEach(evt =>
+      streamVideo.addEventListener(evt, () => { streamPlaying = false; })
+    );
 
     /* ── Helpers ── */
     function setRangeFill(inp, active) {
@@ -645,14 +662,16 @@
         }
         const txEl = document.getElementById("status-tx");
         const rxEl = document.getElementById("status-rx");
-        if (txEl) txEl.textContent = data.net_tx_kbps != null ? Math.round(data.net_tx_kbps/8)+" kB/s" : "N/A";
-        if (rxEl) rxEl.textContent = data.net_rx_kbps != null ? Math.round(data.net_rx_kbps/8)+" kB/s" : "N/A";
+        if (txEl) txEl.textContent = data.net_iface && data.net_tx_kbps != null ? (data.net_tx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
+        if (rxEl) rxEl.textContent = data.net_iface && data.net_rx_kbps != null ? (data.net_rx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
         if (data.io_devices) renderIO(data.io_devices);
+        refreshDot(data.camera_ok);
         if (data.camera_ok) {
-          camDot.className = "cam-dot ok";
           if (wasDown) { wasDown = false; startMediaMTX(); }
-        } else { camDot.className = "cam-dot err"; wasDown = true; }
-      }).catch(() => { camDot.className = "cam-dot err"; });
+        } else {
+          wasDown = true;
+        }
+      }).catch(() => { refreshDot(false); });
     }
     updateStatus();
     setInterval(updateStatus, 3000);

@@ -212,15 +212,15 @@ def publisher_active():
 atexit.register(stop_mediamtx)
 atexit.register(stop_publisher)
 
-# Kill leftovers
+# Kill any leftover processes from a previous run.
+# Subprocess startup (start_mediamtx / start_publisher) is intentionally
+# deferred to _start_bg_threads(), which runs in the gunicorn worker process
+# AFTER fork — this ensures the worker is the proper parent of those
+# subprocesses and Popen.poll() works correctly.
 for sig in (["pkill", "-x", "mediamtx"], ["pkill", "-x", "mtxrpicam"],
             ["pkill", "-f", "publisher.py"]):
     subprocess.run(sig, capture_output=True)
 time.sleep(1)
-
-start_mediamtx()
-time.sleep(2)
-start_publisher()
 
 # ---------------------------------------------------------------------------
 # WATCHDOG
@@ -237,7 +237,6 @@ def _watchdog():
             logging.warning("Publisher died — restarting")
             start_publisher()
 
-threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
 # ---------------------------------------------------------------------------
 # NETWORK MONITOR
@@ -246,9 +245,37 @@ class NetworkMonitor:
     def __init__(self):
         self._tx = self._rx = 0.0
         self._pt = self._px = self._py = 0.0
-        self._iface = next((i for i in ("wlan0","wlan1","eth0")
-                            if os.path.exists(f"/sys/class/net/{i}")), None)
+        self._iface = self._pick_iface()
         threading.Thread(target=self._loop, daemon=True).start()
+
+    @staticmethod
+    def _pick_iface():
+        # 1. Use the interface of the default route (most reliable)
+        try:
+            out = subprocess.check_output(['ip', 'route', 'show', 'default'], text=True)
+            for line in out.splitlines():
+                parts = line.split()
+                if 'dev' in parts:
+                    dev = parts[parts.index('dev') + 1]
+                    if os.path.exists(f'/sys/class/net/{dev}/statistics/tx_bytes'):
+                        return dev
+        except Exception:
+            pass
+        # 2. Fall back: pick non-loopback interface with the highest tx_bytes
+        try:
+            best, best_tx = None, -1
+            for name in os.listdir('/sys/class/net'):
+                if name == 'lo':
+                    continue
+                try:
+                    tx = int(open(f'/sys/class/net/{name}/statistics/tx_bytes').read())
+                    if tx > best_tx:
+                        best_tx, best = tx, name
+                except Exception:
+                    pass
+            return best
+        except Exception:
+            return None
 
     def _loop(self):
         while True:
@@ -269,7 +296,22 @@ class NetworkMonitor:
     def stats(self):
         return {"iface": self._iface, "tx_kbps": max(0.0, self._tx), "rx_kbps": max(0.0, self._rx)}
 
-net_monitor = NetworkMonitor()
+net_monitor = None
+
+def _start_bg_threads():
+    """Start subprocesses and background threads.
+    Must run inside the gunicorn WORKER (after fork) so that Popen objects
+    are owned by the serving process and poll() / wait() work correctly.
+    Called via gunicorn post_worker_init — do NOT call at module level."""
+    global net_monitor
+    start_mediamtx()
+    time.sleep(2)
+    start_publisher()
+    net_monitor = NetworkMonitor()
+    threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
+
+# NOTE: _start_bg_threads() is intentionally NOT called here.
+# It is called only in the gunicorn worker via post_worker_init.
 
 # ---------------------------------------------------------------------------
 # ROUTES
@@ -280,7 +322,7 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    net = net_monitor.stats()
+    net = net_monitor.stats() if net_monitor else {"iface": None, "tx_kbps": 0.0, "rx_kbps": 0.0}
     ok  = mediamtx_active() and publisher_active()
     return jsonify({
         "resolution": settings["resolution"],
@@ -409,4 +451,5 @@ if __name__ == "__main__":
         "timeout":      120,
         "keepalive":    2,
         "loglevel":     "warning",
+        "post_worker_init": lambda w: _start_bg_threads(),
     }).run()
