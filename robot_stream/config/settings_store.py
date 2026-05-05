@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Any
 
-from exceptions import ValidationError
+from robot_stream.errors import ValidationError
 
 
 RESOLUTION_OPTIONS = [[320, 240], [640, 480]]
@@ -25,8 +25,8 @@ DEFAULT_SETTINGS = {
 }
 
 
-class SettingsManager:
-    """Owns settings loading, validation, and persistence."""
+class SettingsStore:
+    """Loads, validates, and persists runtime settings."""
 
     def __init__(self, settings_file: str):
         self._settings_file = settings_file
@@ -37,7 +37,7 @@ class SettingsManager:
         return self._settings
 
     def _default_io_devices(self) -> list[dict[str, Any]]:
-        return [{"name": f"Device {i+1}", "state": False} for i in range(DEVICE_COUNT)]
+        return [{"name": f"Device {i + 1}", "state": False} for i in range(DEVICE_COUNT)]
 
     def _normalize_io_devices(self, value: Any) -> list[dict[str, Any]]:
         devices = value if isinstance(value, list) else []
@@ -45,9 +45,9 @@ class SettingsManager:
 
         for i in range(DEVICE_COUNT):
             current = devices[i] if i < len(devices) and isinstance(devices[i], dict) else {}
-            name = str(current.get("name", f"Device {i+1}")).strip()[:MAX_DEVICE_NAME_LEN]
+            name = str(current.get("name", f"Device {i + 1}")).strip()[:MAX_DEVICE_NAME_LEN]
             state = bool(current.get("state", False))
-            normalized.append({"name": name or f"Device {i+1}", "state": state})
+            normalized.append({"name": name or f"Device {i + 1}", "state": state})
 
         return normalized
 
@@ -58,8 +58,8 @@ class SettingsManager:
             return settings
 
         try:
-            with open(self._settings_file, "r", encoding="utf-8") as f:
-                saved = json.load(f)
+            with open(self._settings_file, "r", encoding="utf-8") as file_obj:
+                loaded = json.load(file_obj)
         except (json.JSONDecodeError, OSError) as exc:
             logging.warning("Could not read settings file, using defaults: %s", exc)
             settings = dict(DEFAULT_SETTINGS)
@@ -67,7 +67,7 @@ class SettingsManager:
             return settings
 
         settings = dict(DEFAULT_SETTINGS)
-        settings.update(saved if isinstance(saved, dict) else {})
+        settings.update(loaded if isinstance(loaded, dict) else {})
 
         try:
             settings["resolution"] = self.validate_resolution(settings.get("resolution"))
@@ -89,8 +89,8 @@ class SettingsManager:
 
     def save(self) -> None:
         try:
-            with open(self._settings_file, "w", encoding="utf-8") as f:
-                json.dump(self._settings, f, indent=2)
+            with open(self._settings_file, "w", encoding="utf-8") as file_obj:
+                json.dump(self._settings, file_obj, indent=2)
         except OSError as exc:
             logging.warning("Could not save settings: %s", exc)
 
@@ -121,10 +121,10 @@ class SettingsManager:
         return value or f"Device {index + 1}"
 
     def set_rotation(self, rotation: Any) -> int:
-        value = self.validate_rotation(rotation)
-        self._settings["rotation"] = value
+        normalized = self.validate_rotation(rotation)
+        self._settings["rotation"] = normalized
         self.save()
-        return value
+        return normalized
 
     def toggle_io(self, index: Any) -> tuple[int, bool]:
         idx = self.validate_io_index(index)
@@ -140,11 +140,13 @@ class SettingsManager:
         self.save()
         return idx, new_name
 
-    def set_controlled_stream_settings(self, resolution: Any, fps: Any) -> bool:
+    def set_stream_settings(self, resolution: Any, fps: Any) -> bool:
         changed = False
+
         if resolution and isinstance(resolution, (list, tuple)) and list(resolution) in RESOLUTION_OPTIONS:
             self._settings["resolution"] = list(resolution)
             changed = True
+
         if fps is not None:
             try:
                 fps_value = int(fps)
@@ -153,6 +155,8 @@ class SettingsManager:
                     changed = True
             except (TypeError, ValueError):
                 pass
+
         if changed:
             self.save()
+
         return changed

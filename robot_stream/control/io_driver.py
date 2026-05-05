@@ -1,10 +1,10 @@
 from typing import Iterable
 
-from controllable_components.gpio_backend import GPIOBackend
+from robot_stream.control.gpio_adapter import GPIOBackend
 
 
 class OutputController:
-    """Manages 4 digital GPIO outputs used by web I/O toggles."""
+    """Manages 4 digital GPIO outputs for web I/O toggles."""
 
     def __init__(self, backend: GPIOBackend, pins: Iterable[int]):
         self._backend = backend

@@ -4,7 +4,7 @@ import time
 
 
 class NetworkMonitor:
-    """Tracks tx/rx throughput on a preferred network interface."""
+    """Tracks network tx/rx throughput on the preferred interface."""
 
     def __init__(self):
         self._tx = 0.0
@@ -12,7 +12,7 @@ class NetworkMonitor:
         self._pt = 0.0
         self._px = 0.0
         self._py = 0.0
-        self._iface = next((i for i in ("wlan0", "wlan1", "eth0") if os.path.exists(f"/sys/class/net/{i}")), None)
+        self._iface = next((name for name in ("wlan0", "wlan1", "eth0") if os.path.exists(f"/sys/class/net/{name}")), None)
         self._started = False
         self._lock = threading.Lock()
 
@@ -20,7 +20,7 @@ class NetworkMonitor:
         with self._lock:
             if self._started:
                 return
-            threading.Thread(target=self._loop, daemon=True, name="net-monitor").start()
+            threading.Thread(target=self._loop, daemon=True, name="network-monitor").start()
             self._started = True
 
     def _loop(self) -> None:
@@ -28,6 +28,7 @@ class NetworkMonitor:
             time.sleep(2)
             if not self._iface:
                 continue
+
             try:
                 tx = int(open(f"/sys/class/net/{self._iface}/statistics/tx_bytes", "r", encoding="utf-8").read())
                 rx = int(open(f"/sys/class/net/{self._iface}/statistics/rx_bytes", "r", encoding="utf-8").read())

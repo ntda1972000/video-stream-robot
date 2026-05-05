@@ -8,9 +8,7 @@ class MotorPinSet:
     en: int
 
 
-# Pin plan (BCM numbering): 4 motors + 4 enable PWM channels for L298N-based setup.
-# Left side motors: index 0 and 2
-# Right side motors: index 1 and 3
+# GPIO pin plan (BCM numbering) for 4 motors on L298N-compatible wiring.
 DEFAULT_MOTOR_PIN_CONFIG = [
     MotorPinSet(in1=5, in2=6, en=12),
     MotorPinSet(in1=13, in2=19, en=26),
@@ -18,5 +16,5 @@ DEFAULT_MOTOR_PIN_CONFIG = [
     MotorPinSet(in1=23, in2=24, en=25),
 ]
 
-# 4 web-controlled digital outputs (BCM numbering).
+# 4 web-controlled digital output pins.
 DEFAULT_IO_PINS = [17, 27, 22, 4]

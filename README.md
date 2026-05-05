@@ -1,35 +1,82 @@
-# video-stream-robot
+# Video Stream Robot
 
-## Controllable Components
+Professional robot-streaming stack with layered Python architecture, GPIO motor control, web-based joystick/IO control, and WebRTC proxying via MediaMTX.
 
-GPIO-based controllable logic is grouped in [controllable_components](controllable_components):
+## Architecture
 
-- [controllable_components/l298n_controller.py](controllable_components/l298n_controller.py): 4-motor differential drive via joystick (`/api/control`)
-- [controllable_components/io_controller.py](controllable_components/io_controller.py): 4 digital outputs via web IO toggles (`/api/io_toggle`)
-- [controllable_components/gpio_backend.py](controllable_components/gpio_backend.py): auto-selects `RPi.GPIO` on Raspberry Pi, falls back to mock backend elsewhere
-- [controllable_components/pin_config.py](controllable_components/pin_config.py): pin mapping and defaults
+The project now follows a clean package structure under `robot_stream`:
 
-## GPIO Pin Configuration (BCM)
+- `robot_stream/api`: HTTP routes and server bootstrapping
+- `robot_stream/config`: settings validation and persistence
+- `robot_stream/runtime`: process supervision, certificate handling, network stats
+- `robot_stream/control`: GPIO adapters, motor and IO drivers, pin layout
+- `robot_stream/services`: orchestration and business logic
+- `robot_stream/streaming`: camera/audio publisher runtime
 
-### L298N 4 Motors
+Top-level files are intentionally thin wrappers:
 
-- Motor 0 (left): `IN1=5`, `IN2=6`, `EN=12`
-- Motor 1 (right): `IN1=13`, `IN2=19`, `EN=26`
-- Motor 2 (left): `IN1=16`, `IN2=20`, `EN=21`
-- Motor 3 (right): `IN1=23`, `IN2=24`, `EN=25`
+- `app.py`: server entrypoint
+- `publisher.py`: stream publisher entrypoint
 
-Joystick mapping:
+## Project Layout
 
-- `x` controls turn
-- `y` controls throttle
-- Left speed = `y + x`
-- Right speed = `y - x`
+```text
+video-stream-robot/
+  app.py
+  publisher.py
+  robot_stream/
+    api/
+      web_app.py
+    config/
+      settings_store.py
+    runtime/
+      process_supervisor.py
+      network_monitor.py
+      certificate_manager.py
+    control/
+      gpio_adapter.py
+      motor_driver.py
+      io_driver.py
+      pin_layout.py
+    services/
+      robot_service.py
+    streaming/
+      publisher_app.py
+  templates/
+    dashboard.html
+    index.html
+  settings.json
+  start.sh
+  setup_robot.sh
+```
 
-### 4 Digital IO Outputs
+## GPIO Configuration (BCM)
 
-- IO 0: GPIO `17`
-- IO 1: GPIO `27`
-- IO 2: GPIO `22`
-- IO 3: GPIO `4`
+### L298N 4-Motor Drive
 
-These outputs are synchronized with the existing web IO state (`settings.json` + `/api/io_toggle`).
+- Motor 0 (left): IN1=5, IN2=6, EN=12
+- Motor 1 (right): IN1=13, IN2=19, EN=26
+- Motor 2 (left): IN1=16, IN2=20, EN=21
+- Motor 3 (right): IN1=23, IN2=24, EN=25
+
+Joystick differential drive mapping:
+
+- turn = x
+- throttle = y
+- left_speed = y + x
+- right_speed = y - x
+
+### 4 Digital Outputs
+
+- IO 0: GPIO 17
+- IO 1: GPIO 27
+- IO 2: GPIO 22
+- IO 3: GPIO 4
+
+Web IO toggles remain synchronized with `settings.json` and the `/api/io_toggle` endpoint.
+
+## Runtime Behavior
+
+- If `RPi.GPIO` is available, the app drives real GPIO pins.
+- If not available (development machine), it automatically falls back to an in-memory mock backend.
+- Existing dashboard endpoints and payload contracts are preserved.

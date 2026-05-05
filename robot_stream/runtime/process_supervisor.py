@@ -8,18 +8,18 @@ import time
 from typing import Optional
 
 
-class RuntimeProcessManager:
-    """Manages MediaMTX and publisher subprocess lifecycles."""
+class RuntimeProcessSupervisor:
+    """Owns MediaMTX and publisher subprocess lifecycle management."""
 
-    def __init__(self, base_dir: str):
-        self._base_dir = base_dir
-        self._mtx_bin = os.path.join(base_dir, "..", "rc-car", "mediamtx")
-        self._mtx_cfg = os.path.join(base_dir, "mediamtx_run.yml")
-        self._pub_script = os.path.join(base_dir, "publisher.py")
+    def __init__(self, project_root: str):
+        self._project_root = project_root
+        self._mtx_bin = os.path.join(project_root, "mediamtx", "mediamtx")
+        self._mtx_cfg = os.path.join(project_root, "mediamtx_run.yml")
+        self._publisher_script = os.path.join(project_root, "publisher.py")
         self._mtx_proc: Optional[subprocess.Popen] = None
-        self._pub_proc: Optional[subprocess.Popen] = None
+        self._publisher_proc: Optional[subprocess.Popen] = None
         self._mtx_log = None
-        self._pub_log = None
+        self._publisher_log = None
         self._watchdog_started = False
         self._watchdog_lock = threading.Lock()
 
@@ -27,14 +27,14 @@ class RuntimeProcessManager:
         atexit.register(self.stop_publisher)
 
     def cleanup_leftovers(self) -> None:
-        for sig in (["pkill", "-x", "mediamtx"], ["pkill", "-x", "mtxrpicam"], ["pkill", "-f", "publisher.py"]):
-            subprocess.run(sig, capture_output=True)
+        for command in (["pkill", "-x", "mediamtx"], ["pkill", "-x", "mtxrpicam"], ["pkill", "-f", "publisher.py"]):
+            subprocess.run(command, capture_output=True)
 
     def _collect_non_loopback_ips(self) -> list[str]:
         ips = []
         try:
-            out = subprocess.check_output(["ip", "-4", "-o", "addr"], text=True)
-            for line in out.splitlines():
+            output = subprocess.check_output(["ip", "-4", "-o", "addr"], text=True)
+            for line in output.splitlines():
                 parts = line.split()
                 if len(parts) >= 4 and parts[1] != "lo":
                     ip = parts[3].split("/")[0]
@@ -44,11 +44,12 @@ class RuntimeProcessManager:
             pass
         return ips
 
-    def write_mtx_config(self) -> None:
+    def write_mediamtx_config(self) -> None:
         ips = self._collect_non_loopback_ips()
-        ice = "[" + ", ".join(ips) + "]" if ips else "[]"
-        with open(self._mtx_cfg, "w", encoding="utf-8") as f:
-            f.write(
+        ice_hosts = "[" + ", ".join(ips) + "]" if ips else "[]"
+
+        with open(self._mtx_cfg, "w", encoding="utf-8") as config_file:
+            config_file.write(
                 f"""logLevel: info
 logDestinations: [stdout]
 api: yes
@@ -63,7 +64,7 @@ srt: no
 webrtc: yes
 webrtcAddress: :8889
 webrtcICEServers2: []
-webrtcAdditionalHosts: {ice}
+webrtcAdditionalHosts: {ice_hosts}
 paths:
   robot:
     source: publisher
@@ -80,12 +81,13 @@ paths:
     def start_mediamtx(self) -> None:
         if self.mediamtx_active():
             return
+
         if not os.path.exists(self._mtx_bin):
             logging.warning("mediamtx not found: %s", self._mtx_bin)
             return
 
-        self.write_mtx_config()
-        self._mtx_log = open(os.path.join(self._base_dir, "mediamtx.log"), "w", encoding="utf-8")
+        self.write_mediamtx_config()
+        self._mtx_log = open(os.path.join(self._project_root, "mediamtx.log"), "w", encoding="utf-8")
         self._mtx_proc = subprocess.Popen([self._mtx_bin, self._mtx_cfg], stdout=self._mtx_log, stderr=self._mtx_log)
         logging.info("MediaMTX started PID=%s", self._mtx_proc.pid)
 
@@ -96,6 +98,7 @@ paths:
                 self._mtx_proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self._mtx_proc.kill()
+
         self._mtx_proc = None
         if self._mtx_log:
             self._mtx_log.close()
@@ -107,34 +110,36 @@ paths:
     def start_publisher(self) -> None:
         if self.publisher_active():
             return
-        if not os.path.exists(self._pub_script):
-            logging.warning("publisher.py not found: %s", self._pub_script)
+
+        if not os.path.exists(self._publisher_script):
+            logging.warning("publisher.py not found: %s", self._publisher_script)
             return
 
-        python_exec = os.environ.get("PYTHON_EXECUTABLE", sys.executable or "python3")
-        self._pub_log = open(os.path.join(self._base_dir, "publisher.log"), "w", encoding="utf-8")
-        self._pub_proc = subprocess.Popen(
-            [python_exec, self._pub_script],
-            stdout=self._pub_log,
-            stderr=self._pub_log,
+        python_executable = os.environ.get("PYTHON_EXECUTABLE", sys.executable or "python3")
+        self._publisher_log = open(os.path.join(self._project_root, "publisher.log"), "w", encoding="utf-8")
+        self._publisher_proc = subprocess.Popen(
+            [python_executable, self._publisher_script],
+            stdout=self._publisher_log,
+            stderr=self._publisher_log,
             start_new_session=True,
         )
-        logging.info("Publisher started PID=%s", self._pub_proc.pid)
+        logging.info("Publisher started PID=%s", self._publisher_proc.pid)
 
     def stop_publisher(self) -> None:
-        if self._pub_proc and self._pub_proc.poll() is None:
-            self._pub_proc.terminate()
+        if self._publisher_proc and self._publisher_proc.poll() is None:
+            self._publisher_proc.terminate()
             try:
-                self._pub_proc.wait(timeout=5)
+                self._publisher_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._pub_proc.kill()
-        self._pub_proc = None
-        if self._pub_log:
-            self._pub_log.close()
-            self._pub_log = None
+                self._publisher_proc.kill()
+
+        self._publisher_proc = None
+        if self._publisher_log:
+            self._publisher_log.close()
+            self._publisher_log = None
 
     def publisher_active(self) -> bool:
-        return self._pub_proc is not None and self._pub_proc.poll() is None
+        return self._publisher_proc is not None and self._publisher_proc.poll() is None
 
     def restart_publisher(self) -> None:
         self.stop_publisher()
@@ -152,17 +157,17 @@ paths:
         while True:
             time.sleep(5)
             if not self.mediamtx_active():
-                logging.warning("MediaMTX died - restarting")
+                logging.warning("MediaMTX exited unexpectedly, restarting")
                 self.stop_mediamtx()
                 self.start_mediamtx()
                 time.sleep(2)
             if not self.publisher_active():
-                logging.warning("Publisher died - restarting")
+                logging.warning("Publisher exited unexpectedly, restarting")
                 self.start_publisher()
 
     def start_watchdog(self) -> None:
         with self._watchdog_lock:
             if self._watchdog_started:
                 return
-            threading.Thread(target=self._watchdog_loop, daemon=True, name="watchdog").start()
+            threading.Thread(target=self._watchdog_loop, daemon=True, name="runtime-watchdog").start()
             self._watchdog_started = True

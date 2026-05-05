@@ -4,7 +4,7 @@ from typing import Dict
 
 
 class GPIOBackend:
-    """Hardware abstraction to allow GPIO simulation off-device."""
+    """Hardware abstraction to run with real GPIO on Pi or mock elsewhere."""
 
     def setup_output(self, pin: int) -> None:
         raise NotImplementedError
