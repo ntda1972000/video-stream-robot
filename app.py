@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import atexit
+from typing import Callable
 import urllib.request as _urllib_req
 from flask import Flask, render_template, jsonify, request
 
@@ -28,35 +29,55 @@ DEFAULT_SETTINGS = {
     ],
 }
 
-def load_settings():
-    global settings
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE) as f:
-                saved = json.load(f)
-            for k, v in DEFAULT_SETTINGS.items():
-                if k not in saved:
-                    saved[k] = v
-            saved["resolution"] = list(saved["resolution"])
-            settings = saved
-            return
-        except Exception:
-            pass
-    settings = dict(DEFAULT_SETTINGS)
-    # Ensure io_devices always has 4 entries
-    settings["io_devices"] = [{"name": f"Device {i+1}", "state": False} for i in range(4)]
 
-load_settings()
+class SettingsStore:
+    def __init__(self, settings_file: str, default_settings: dict):
+        self._settings_file = settings_file
+        self._default_settings = default_settings
+        self._data = self._build_default()
+
+    def _build_default(self) -> dict:
+        data = dict(self._default_settings)
+        data["io_devices"] = [{"name": f"Device {i+1}", "state": False} for i in range(4)]
+        return data
+
+    def load(self) -> None:
+        if os.path.exists(self._settings_file):
+            try:
+                with open(self._settings_file) as f:
+                    saved = json.load(f)
+                for key, value in self._default_settings.items():
+                    if key not in saved:
+                        saved[key] = value
+                saved["resolution"] = list(saved["resolution"])
+                saved["io_devices"] = list(saved.get("io_devices", []))[:4]
+                while len(saved["io_devices"]) < 4:
+                    idx = len(saved["io_devices"]) + 1
+                    saved["io_devices"].append({"name": f"Device {idx}", "state": False})
+                self._data = saved
+                return
+            except Exception:
+                pass
+        self._data = self._build_default()
+
+    def save(self) -> None:
+        try:
+            with open(self._settings_file, "w") as f:
+                json.dump(self._data, f, indent=2)
+        except Exception as exc:
+            logging.warning("Could not save settings: %s", exc)
+
+    @property
+    def data(self) -> dict:
+        return self._data
+
+
+settings_store = SettingsStore(SETTINGS_FILE, DEFAULT_SETTINGS)
+settings_store.load()
+settings = settings_store.data
 
 RESOLUTION_OPTIONS = [[320, 240], [640, 480]]
 FPS_OPTIONS = [5, 10, 15, 20, 25, 30]
-
-def save_settings():
-    try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=2)
-    except Exception as e:
-        logging.warning(f"Could not save settings: {e}")
 
 # ---------------------------------------------------------------------------
 # PATHS
@@ -108,8 +129,6 @@ def _ensure_cert():
     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     logging.info("Certificate written: %s", san)
 
-_mtx_proc = None
-_pub_proc = None
 _STREAM_PATH = "robot"  # must match publisher.py RTSP_URL path
 
 # ---------------------------------------------------------------------------
@@ -156,61 +175,163 @@ paths:
     runOnReadyRestart: yes
 """)
 
-def start_mediamtx():
-    global _mtx_proc
-    if _mtx_proc and _mtx_proc.poll() is None:
-        return
-    if not os.path.exists(_MTX_BIN):
-        logging.warning(f"mediamtx not found: {_MTX_BIN}")
-        return
+
+class ManagedProcess:
+    def __init__(
+        self,
+        name: str,
+        command_factory: Callable[[], list[str]],
+        log_path: str,
+        exists_check: Callable[[], bool] | None = None,
+        start_new_session: bool = False,
+        stop_timeout: int = 5,
+    ):
+        self._name = name
+        self._command_factory = command_factory
+        self._log_path = log_path
+        self._exists_check = exists_check
+        self._start_new_session = start_new_session
+        self._stop_timeout = stop_timeout
+        self._proc = None
+        self._log_handle = None
+
+    def is_active(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self) -> None:
+        if self.is_active():
+            return
+        if self._exists_check and not self._exists_check():
+            logging.warning("%s start skipped due to missing dependency", self._name)
+            return
+        cmd = self._command_factory()
+        self._log_handle = open(self._log_path, "w")
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=self._log_handle,
+            stderr=self._log_handle,
+            start_new_session=self._start_new_session,
+        )
+        logging.info("%s started PID=%s", self._name, self._proc.pid)
+
+    def stop(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=self._stop_timeout)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+
+
+def _mediamtx_exists() -> bool:
+    ok = os.path.exists(_MTX_BIN)
+    if not ok:
+        logging.warning("mediamtx not found: %s", _MTX_BIN)
+    return ok
+
+
+def _publisher_exists() -> bool:
+    ok = os.path.exists(_PUB_SCRIPT)
+    if not ok:
+        logging.warning("publisher.py not found: %s", _PUB_SCRIPT)
+    return ok
+
+
+def _mediamtx_command() -> list[str]:
     _write_mtx_config()
-    log = open(os.path.join(_BASE, "mediamtx.log"), "w")
-    _mtx_proc = subprocess.Popen([_MTX_BIN, _MTX_CFG], stdout=log, stderr=log)
-    logging.info(f"MediaMTX started PID={_mtx_proc.pid}")
+    return [_MTX_BIN, _MTX_CFG]
+
+
+def _publisher_command() -> list[str]:
+    return ["python3", _PUB_SCRIPT]
+
+
+class RuntimeProcessSupervisor:
+    def __init__(self):
+        self._mediamtx = ManagedProcess(
+            name="MediaMTX",
+            command_factory=_mediamtx_command,
+            log_path=os.path.join(_BASE, "mediamtx.log"),
+            exists_check=_mediamtx_exists,
+            stop_timeout=3,
+        )
+        self._publisher = ManagedProcess(
+            name="Publisher",
+            command_factory=_publisher_command,
+            log_path=os.path.join(_BASE, "publisher.log"),
+            exists_check=_publisher_exists,
+            start_new_session=True,
+            stop_timeout=5,
+        )
+
+    def start_all(self) -> None:
+        self._mediamtx.start()
+        time.sleep(2)
+        self._publisher.start()
+
+    def start_mediamtx(self) -> None:
+        self._mediamtx.start()
+
+    def stop_mediamtx(self) -> None:
+        self._mediamtx.stop()
+
+    def start_publisher(self) -> None:
+        self._publisher.start()
+
+    def stop_publisher(self) -> None:
+        self._publisher.stop()
+
+    def stop_all(self) -> None:
+        self._publisher.stop()
+        self._mediamtx.stop()
+
+    def ensure_running(self) -> None:
+        if not self._mediamtx.is_active():
+            logging.warning("MediaMTX died - restarting")
+            self._mediamtx.stop()
+            self._mediamtx.start()
+            time.sleep(2)
+        if not self._publisher.is_active():
+            logging.warning("Publisher died - restarting")
+            self._publisher.start()
+
+    def restart_publisher(self) -> None:
+        self._publisher.stop()
+        time.sleep(0.5)
+        self._publisher.start()
+
+    def mediamtx_active(self) -> bool:
+        return self._mediamtx.is_active()
+
+    def publisher_active(self) -> bool:
+        return self._publisher.is_active()
+
+
+process_supervisor = RuntimeProcessSupervisor()
+
+def start_mediamtx():
+    process_supervisor.start_mediamtx()
 
 def stop_mediamtx():
-    global _mtx_proc
-    if _mtx_proc and _mtx_proc.poll() is None:
-        _mtx_proc.terminate()
-        try: _mtx_proc.wait(timeout=3)
-        except subprocess.TimeoutExpired: _mtx_proc.kill()
-    _mtx_proc = None
+    process_supervisor.stop_mediamtx()
 
 def mediamtx_active():
-    return _mtx_proc is not None and _mtx_proc.poll() is None
+    return process_supervisor.mediamtx_active()
 
 # ---------------------------------------------------------------------------
 # PUBLISHER — launch publisher.py as a fully detached subprocess
 # ---------------------------------------------------------------------------
 def start_publisher():
-    global _pub_proc
-    if _pub_proc and _pub_proc.poll() is None:
-        return
-    if not os.path.exists(_PUB_SCRIPT):
-        logging.warning(f"publisher.py not found: {_PUB_SCRIPT}")
-        return
-    log = open(os.path.join(_BASE, "publisher.log"), "w")
-    # Launch with its own process group so it doesn't share our terminal
-    _pub_proc = subprocess.Popen(
-        ["python3", _PUB_SCRIPT],
-        stdout=log, stderr=log,
-        start_new_session=True,
-    )
-    logging.info(f"Publisher started PID={_pub_proc.pid}")
+    process_supervisor.start_publisher()
 
 def stop_publisher():
-    global _pub_proc
-    if _pub_proc and _pub_proc.poll() is None:
-        _pub_proc.terminate()
-        try: _pub_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired: _pub_proc.kill()
-    _pub_proc = None
+    process_supervisor.stop_publisher()
 
 def publisher_active():
-    return _pub_proc is not None and _pub_proc.poll() is None
+    return process_supervisor.publisher_active()
 
-atexit.register(stop_mediamtx)
-atexit.register(stop_publisher)
+atexit.register(process_supervisor.stop_all)
 
 # Kill any leftover processes from a previous run.
 # Subprocess startup (start_mediamtx / start_publisher) is intentionally
@@ -228,14 +349,7 @@ time.sleep(1)
 def _watchdog():
     while True:
         time.sleep(5)
-        if not mediamtx_active():
-            logging.warning("MediaMTX died — restarting")
-            stop_mediamtx()
-            start_mediamtx()
-            time.sleep(2)
-        if not publisher_active():
-            logging.warning("Publisher died — restarting")
-            start_publisher()
+        process_supervisor.ensure_running()
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +418,7 @@ def _start_bg_threads():
     are owned by the serving process and poll() / wait() work correctly.
     Called via gunicorn post_worker_init — do NOT call at module level."""
     global net_monitor
-    start_mediamtx()
-    time.sleep(2)
-    start_publisher()
+    process_supervisor.start_all()
     net_monitor = NetworkMonitor()
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
@@ -355,7 +467,7 @@ def api_io_toggle():
     if not isinstance(idx, int) or not (0 <= idx <= 3):
         return jsonify({"error": "index must be 0-3"}), 400
     settings["io_devices"][idx]["state"] = not settings["io_devices"][idx]["state"]
-    save_settings()
+    settings_store.save()
     return jsonify({"status": "ok", "index": idx, "state": settings["io_devices"][idx]["state"]})
 
 @app.route("/api/io_rename", methods=["POST"])
@@ -366,7 +478,7 @@ def api_io_rename():
     if not isinstance(idx, int) or not (0 <= idx <= 3):
         return jsonify({"error": "index must be 0-3"}), 400
     settings["io_devices"][idx]["name"] = name or f"Device {idx+1}"
-    save_settings()
+    settings_store.save()
     return jsonify({"status": "ok", "index": idx, "name": settings["io_devices"][idx]["name"]})
 
 @app.route("/api/rotation", methods=["POST"])
@@ -376,7 +488,7 @@ def api_rotation():
     if deg not in (0, 90, 180, 270):
         return jsonify({"error": "rotation must be 0, 90, 180 or 270"}), 400
     settings["rotation"] = deg
-    save_settings()
+    settings_store.save()
     return jsonify({"status": "ok", "rotation": deg})
 
 @app.route("/api/update_settings", methods=["POST"])
@@ -392,10 +504,8 @@ def api_update_settings():
         settings["fps"] = int(new_fps)
         changed = True
     if changed:
-        save_settings()
-        stop_publisher()
-        time.sleep(0.5)
-        start_publisher()
+        settings_store.save()
+        process_supervisor.restart_publisher()
     return jsonify({"status": "ok", "resolution": settings["resolution"], "fps": settings["fps"]})
 
 # ---------------------------------------------------------------------------

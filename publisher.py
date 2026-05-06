@@ -17,39 +17,60 @@ import signal
 import shutil
 import json
 import os
+from dataclasses import dataclass
 
 # ── Cấu hình ──────────────────────────────────────────────────
 RTSP_URL      = "rtsp://localhost:8554/robot"
 AUDIO_BITRATE = "32k"
 ALSA_MIC      = "default"   # 'hw:1,0' cho USB mic; bỏ qua nếu không có mic
 
-# Read resolution/fps from settings.json if available
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-try:
-    with open(_SETTINGS_FILE) as _f:
-        _s = json.load(_f)
-    WIDTH, HEIGHT = list(_s.get("resolution", [640, 480]))
-    FPS = int(_s.get("fps", 20))
-except Exception:
-    WIDTH, HEIGHT = 640, 480
-    FPS = 20
 
-# Compute bitrate proportionally: 640x480@30 = 500 kbps baseline
-# Scale by (pixels × fps) relative to baseline, clamped 80k–500k
-_pixels   = WIDTH * HEIGHT * FPS
-_baseline = 640 * 480 * 30   # = 9,216,000
-VIDEO_BITRATE = str(max(80, min(500, int(_pixels / _baseline * 500)))) + "k"
+
+@dataclass(frozen=True)
+class VideoSettings:
+    width: int
+    height: int
+    fps: int
+
+
+def load_video_settings(settings_file: str) -> VideoSettings:
+    try:
+        with open(settings_file) as cfg:
+            data = json.load(cfg)
+        width, height = list(data.get("resolution", [640, 480]))
+        fps = int(data.get("fps", 20))
+        return VideoSettings(width=width, height=height, fps=fps)
+    except Exception:
+        return VideoSettings(width=640, height=480, fps=20)
+
+
+def compute_video_bitrate(width: int, height: int, fps: int) -> str:
+    # 640x480@30 = 500 kbps baseline; clamp to 80k..500k
+    pixels = width * height * fps
+    baseline = 640 * 480 * 30
+    return str(max(80, min(500, int(pixels / baseline * 500)))) + "k"
+
+
+VIDEO_SETTINGS = load_video_settings(_SETTINGS_FILE)
+VIDEO_BITRATE = compute_video_bitrate(VIDEO_SETTINGS.width, VIDEO_SETTINGS.height, VIDEO_SETTINGS.fps)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("publisher")
-log.info("Resolution: %dx%d  FPS: %d  VIDEO_BITRATE: %s", WIDTH, HEIGHT, FPS, VIDEO_BITRATE)
+log.info(
+    "Resolution: %dx%d  FPS: %d  VIDEO_BITRATE: %s",
+    VIDEO_SETTINGS.width,
+    VIDEO_SETTINGS.height,
+    VIDEO_SETTINGS.fps,
+    VIDEO_BITRATE,
+)
 
 
 # ── Phát hiện lệnh capture camera ─────────────────────────────
-def detect_camera_cmd() -> list[str]:
+def detect_camera_cmd(settings: VideoSettings) -> list[str]:
     """Trả về lệnh rpicam-vid hoặc libcamera-vid."""
     for name in ("rpicam-vid", "libcamera-vid"):
         if shutil.which(name):
@@ -58,9 +79,9 @@ def detect_camera_cmd() -> list[str]:
                 name,
                 "-t", "0",          # chạy mãi
                 "-n",               # không preview
-                "--width",  str(WIDTH),
-                "--height", str(HEIGHT),
-                "--framerate", str(FPS),
+                "--width",  str(settings.width),
+                "--height", str(settings.height),
+                "--framerate", str(settings.fps),
                 "--codec", "yuv420",
                 "-o", "-",          # stdout
             ]
@@ -91,7 +112,7 @@ def has_alsa_mic() -> bool:
 
 
 # ── Xây dựng lệnh FFmpeg ──────────────────────────────────────
-def build_ffmpeg_command(encoder: str, with_audio: bool) -> list[str]:
+def build_ffmpeg_command(settings: VideoSettings, encoder: str, with_audio: bool) -> list[str]:
     extra_video: list[str] = []
     if encoder == "h264_omx":
         extra_video = ["-zerocopy", "1"]
@@ -103,8 +124,8 @@ def build_ffmpeg_command(encoder: str, with_audio: bool) -> list[str]:
         # Video từ pipe (YUV420 từ rpicam-vid)
         "-f",      "rawvideo",
         "-pix_fmt", "yuv420p",
-        "-s",      f"{WIDTH}x{HEIGHT}",
-        "-r",      str(FPS),
+        "-s",      f"{settings.width}x{settings.height}",
+        "-r",      str(settings.fps),
         "-i",      "pipe:0",
     ]
 
@@ -136,12 +157,12 @@ def build_ffmpeg_command(encoder: str, with_audio: bool) -> list[str]:
 
 
 def main() -> None:
-    cam_cmd = detect_camera_cmd()
+    cam_cmd = detect_camera_cmd(VIDEO_SETTINGS)
     encoder = detect_video_encoder()
     audio   = has_alsa_mic()
     if not audio:
         log.warning("Không tìm thấy mic — phát video không có âm thanh.")
-    ffmpeg_cmd = build_ffmpeg_command(encoder, audio)
+    ffmpeg_cmd = build_ffmpeg_command(VIDEO_SETTINGS, encoder, audio)
 
     log.info(f"Khởi động camera: {' '.join(cam_cmd)}")
     cam_proc = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE)
