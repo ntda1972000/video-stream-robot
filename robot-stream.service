@@ -1,17 +1,17 @@
 [Unit]
 Description=Robot Stream App
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
 
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/robot-stream-2
-ExecStart=/usr/bin/python3 /home/pi/robot-stream-2/app.py
+WorkingDirectory=/home/pi/video-stream-robot
+ExecStart=/home/pi/video-stream-robot/.venv/bin/python /home/pi/video-stream-robot/app.py
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/home/pi/robot-stream-2/server.log
-StandardError=append:/home/pi/robot-stream-2/server.log
+StandardOutput=append:/home/pi/video-stream-robot/server.log
+StandardError=append:/home/pi/video-stream-robot/server.log
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

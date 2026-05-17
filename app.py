@@ -135,13 +135,14 @@ api: yes
 apiAddress: 127.0.0.1:9997
 metrics: no
 rtsp: yes
-rtspTransports: [tcp]
 rtspAddress: :8554
 rtmp: no
 hls: no
 srt: no
 webrtc: yes
 webrtcAddress: :8889
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: no
 webrtcICEServers2: []
 webrtcAdditionalHosts: {ice}
 paths:
