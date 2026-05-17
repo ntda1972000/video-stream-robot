@@ -20,6 +20,7 @@ DEFAULT_SETTINGS = {
     "resolution": [640, 480],
     "fps": 20,
     "rotation": 0,
+    "motor_trim": 0.0,
     "io_devices": [
         {"name": "Device 1", "state": False},
         {"name": "Device 2", "state": False},
@@ -67,6 +68,88 @@ _MTX_CFG    = os.path.join(_BASE, "mediamtx_run.yml")
 _PUB_SCRIPT = os.path.join(_BASE, "publisher.py")
 _CERT       = os.path.join(_BASE, "cert.pem")
 _KEY        = os.path.join(_BASE, "key.pem")
+# ---------------------------------------------------------------------------
+# GPIO MOTOR CONTROL  (L298N / L293D H-bridge, BCM pin numbering)
+#   Motor LEFT  ? direction: IN1=17, IN2=27   speed: ENA=18 (PWM)
+#   Motor RIGHT ? direction: IN3=22, IN4=23   speed: ENB=13 (PWM)
+# Change pin numbers below to match your wiring.
+# ---------------------------------------------------------------------------
+_MOTOR_L_IN1 = 17
+_MOTOR_L_IN2 = 27
+_MOTOR_L_ENA = 18
+_MOTOR_R_IN1 = 22
+_MOTOR_R_IN2 = 23
+_MOTOR_R_ENA = 13
+_MOTOR_PWM_HZ = 100        # Hz ? adequate for DC brush motors
+
+_pwm_l = _pwm_r = None
+_GPIO_READY = False
+
+try:
+    import RPi.GPIO as _GPIO
+    _GPIO_AVAILABLE = True
+except ImportError:
+    _GPIO = None
+    _GPIO_AVAILABLE = False
+    logging.info("RPi.GPIO not available ? motor output disabled (non-Pi host)")
+
+
+def _setup_motors():
+    global _pwm_l, _pwm_r, _GPIO_READY
+    if not _GPIO_AVAILABLE:
+        return
+    try:
+        _GPIO.setmode(_GPIO.BCM)
+        _GPIO.setwarnings(False)
+        for pin in (_MOTOR_L_IN1, _MOTOR_L_IN2, _MOTOR_L_ENA,
+                    _MOTOR_R_IN1, _MOTOR_R_IN2, _MOTOR_R_ENA):
+            _GPIO.setup(pin, _GPIO.OUT, initial=_GPIO.LOW)
+        _pwm_l = _GPIO.PWM(_MOTOR_L_ENA, _MOTOR_PWM_HZ)
+        _pwm_r = _GPIO.PWM(_MOTOR_R_ENA, _MOTOR_PWM_HZ)
+        _pwm_l.start(0)
+        _pwm_r.start(0)
+        _GPIO_READY = True
+        logging.info("Motors ready ? BCM L(IN1=%d IN2=%d ENA=%d) R(IN1=%d IN2=%d ENA=%d)",
+                     _MOTOR_L_IN1, _MOTOR_L_IN2, _MOTOR_L_ENA,
+                     _MOTOR_R_IN1, _MOTOR_R_IN2, _MOTOR_R_ENA)
+    except Exception as exc:
+        logging.warning("Motor GPIO setup failed: %s", exc)
+
+
+def _drive_motors(left: float, right: float) -> None:
+    """Drive both motors.  Speed in [-1.0, +1.0]; positive = forward."""
+    if not _GPIO_READY:
+        return
+    def _apply(in1, in2, pwm, spd):
+        duty = round(min(abs(spd), 1.0) * 100)
+        if spd > 0.02:
+            _GPIO.output(in1, _GPIO.HIGH); _GPIO.output(in2, _GPIO.LOW)
+        elif spd < -0.02:
+            _GPIO.output(in1, _GPIO.LOW);  _GPIO.output(in2, _GPIO.HIGH)
+        else:
+            _GPIO.output(in1, _GPIO.LOW);  _GPIO.output(in2, _GPIO.LOW)
+            duty = 0
+        pwm.ChangeDutyCycle(duty)
+    _apply(_MOTOR_L_IN1, _MOTOR_L_IN2, _pwm_l, left)
+    _apply(_MOTOR_R_IN1, _MOTOR_R_IN2, _pwm_r, right)
+
+
+def _stop_motors() -> None:
+    _drive_motors(0.0, 0.0)
+
+
+def _cleanup_gpio() -> None:
+    global _GPIO_READY
+    if not _GPIO_AVAILABLE or not _GPIO_READY:
+        return
+    _stop_motors()
+    try:
+        if _pwm_l: _pwm_l.stop()
+        if _pwm_r: _pwm_r.stop()
+        _GPIO.cleanup()
+    except Exception:
+        pass
+    _GPIO_READY = False
 
 def _ensure_cert():
     """Generate a self-signed TLS certificate covering all current IPs (LAN + Tailscale)."""
@@ -212,6 +295,7 @@ def publisher_active():
 
 atexit.register(stop_mediamtx)
 atexit.register(stop_publisher)
+atexit.register(_cleanup_gpio)
 
 # Kill any leftover processes from a previous run.
 # Subprocess startup (start_mediamtx / start_publisher) is intentionally
@@ -308,6 +392,7 @@ def _start_bg_threads():
     start_mediamtx()
     time.sleep(2)
     start_publisher()
+    _setup_motors()
     net_monitor = NetworkMonitor()
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
@@ -338,6 +423,7 @@ def api_status():
         "net_rx_kbps": net["rx_kbps"],
         "io_devices": [{"name": d["name"], "state": d["state"]}
                        for d in settings["io_devices"]],
+        "motor_trim": round(settings.get("motor_trim", 0.0), 3),
     })
 
 _ctrl = {"x": 0.0, "y": 0.0}
@@ -345,8 +431,20 @@ _ctrl = {"x": 0.0, "y": 0.0}
 @app.route("/api/control", methods=["POST"])
 def api_control():
     d = request.get_json(silent=True) or {}
-    _ctrl["x"] = max(-1.0, min(1.0, float(d.get("x", 0))))
-    _ctrl["y"] = max(-1.0, min(1.0, float(d.get("y", 0))))
+    x = max(-1.0, min(1.0, float(d.get("x", 0))))
+    y = max(-1.0, min(1.0, float(d.get("y", 0))))
+    _ctrl["x"] = x
+    _ctrl["y"] = y
+    # Tank-drive mixing: left = throttle+steer, right = throttle-steer
+    # motor_trim compensates mechanical speed differences between the two motors:
+    #   trim > 0  right motor runs faster ? slow right (move slider RIGHT in UI)
+    #   trim < 0  left motor runs faster  ? slow left  (move slider LEFT  in UI)
+    trim  = float(settings.get("motor_trim", 0.0))
+    raw_l = max(-1.0, min(1.0, y + x))
+    raw_r = max(-1.0, min(1.0, y - x))
+    left  = max(-1.0, min(1.0, raw_l * (1.0 + min(0.0, trim))))
+    right = max(-1.0, min(1.0, raw_r * (1.0 - max(0.0, trim))))
+    _drive_motors(left, right)
     return jsonify({"status": "ok", **_ctrl})
 
 @app.route("/api/io_toggle", methods=["POST"])
@@ -397,7 +495,12 @@ def api_update_settings():
         stop_publisher()
         time.sleep(0.5)
         start_publisher()
-    return jsonify({"status": "ok", "resolution": settings["resolution"], "fps": settings["fps"]})
+    new_trim = d.get("motor_trim")
+    if new_trim is not None:
+        settings["motor_trim"] = round(max(-1.0, min(1.0, float(new_trim))), 3)
+        save_settings()
+    return jsonify({"status": "ok", "resolution": settings["resolution"],
+                    "fps": settings["fps"], "motor_trim": settings.get("motor_trim", 0.0)})
 
 # ---------------------------------------------------------------------------
 # WEBRTC SIGNALLING PROXY  (keeps browser on one HTTPS origin → no mixed-content)
