@@ -34,6 +34,8 @@ sudo apt-get update -qq
 sudo apt-get install -y \
   ffmpeg \
   python3-pip \
+  swig \
+  liblgpio-dev \
   python3-venv \
   alsa-utils \
   v4l-utils \
@@ -48,6 +50,7 @@ if [ ! -f "${VENV_DIR}/bin/python" ]; then
 fi
 info "Installing Python packages (flask, gunicorn)..."
 "${VENV_DIR}/bin/pip" install --upgrade pip -q
+"${VENV_DIR}/bin/pip" install rpi-lgpio -q
 "${VENV_DIR}/bin/pip" install flask gunicorn -q
 ok "Python venv ready at ${VENV_DIR}"
 
