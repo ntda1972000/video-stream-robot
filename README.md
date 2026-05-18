@@ -32,7 +32,7 @@ nohup .venv/bin/python app.py > server.log 2>&1 &
 
 Open in a browser and **accept the self-signed certificate**:
 
-```
+```raw
 https://<pi-ip>:5000
 ```
 
@@ -50,7 +50,6 @@ on the same Tailscale network ? including over 4G with no port forwarding requir
 
 1. On the Pi, install and authenticate Tailscale:
 
-   ```bash
    # Install (already done if you answered 'y' during setup_robot.sh)
    curl -fsSL https://tailscale.com/install.sh | sh
 
@@ -59,15 +58,12 @@ on the same Tailscale network ? including over 4G with no port forwarding requir
 
    # Get the Pi's Tailscale IP
    tailscale ip -4
-   ```
 
 2. On your phone / laptop, install Tailscale and join the **same account**.
 
 3. Open the stream:
 
-   ```
    https://<tailscale-ip>:5000
-   ```
 
 ### Headless / Unattended Authentication
 
@@ -115,7 +111,7 @@ sudo tailscale up --authkey=<tskey-auth-...> --hostname=rc-car-<id>
 
 ## Architecture
 
-```
+```raw
 rpicam-vid ? ffmpeg (H264) ? RTSP :8554/robot
                                         ?
                                     mediamtx
@@ -124,7 +120,6 @@ rpicam-vid ? ffmpeg (H264) ? RTSP :8554/robot
                                         ?
                              Browser ? Flask HTTPS :5000
 ```
-
 ## Ports
 
 | Port | Protocol | Purpose                        |
@@ -151,16 +146,22 @@ rpicam-vid ? ffmpeg (H264) ? RTSP :8554/robot
 
 ## Motor Wiring (L298N H-bridge)
 
-Connect the L298N to the Pi using BCM pin numbering:
+Connect the L298N to the Pi using BCM pin numbering.
+ENA/ENB should be tied to fixed HIGH in hardware (jumper to 5V).
+They are not controlled by Raspberry Pi GPIO in this setup.
+Each motor uses one PWM pin (speed) and one digital pin (direction).
 
-| Pi BCM Pin | L298N Pin | Function         |
-|-----------|-----------|------------------|
-| GPIO 17   | IN1       | Left motor FWD   |
-| GPIO 27   | IN2       | Left motor REV   |
-| GPIO 18   | ENA (PWM) | Left motor speed |
-| GPIO 22   | IN3       | Right motor FWD  |
-| GPIO 23   | IN4       | Right motor REV  |
-| GPIO 13   | ENB (PWM) | Right motor speed|
+| Pi BCM Pin | L298N Pin | Function                         |
+|-----------|-----------|----------------------------------|
+| GPIO 17   | IN1 (PWM) | Left motor speed PWM            |
+| GPIO 27   | IN2 (DIR) | Left motor direction (CW/CCW)   |
+| GPIO 22   | IN3 (PWM) | Right motor speed PWM           |
+| GPIO 23   | IN4 (DIR) | Right motor direction (CW/CCW)  |
+
+| L298N Pin | Connection | Function                 |
+|-----------|------------|--------------------------|
+| ENA       | 5V         | Left channel always ON   |
+| ENB       | 5V         | Right channel always ON  |
 
 **Dependencies:** `swig`, `liblgpio-dev` (apt) and `rpi-lgpio` (pip) -- added to `setup_robot.sh`.
 

@@ -69,17 +69,17 @@ _PUB_SCRIPT = os.path.join(_BASE, "publisher.py")
 _CERT       = os.path.join(_BASE, "cert.pem")
 _KEY        = os.path.join(_BASE, "key.pem")
 # ---------------------------------------------------------------------------
-# GPIO MOTOR CONTROL  (L298N / L293D H-bridge, BCM pin numbering)
-#   Motor LEFT  ? direction: IN1=17, IN2=27   speed: ENA=18 (PWM)
-#   Motor RIGHT ? direction: IN3=22, IN4=23   speed: ENB=13 (PWM)
+# GPIO MOTOR CONTROL (L298N / L293D H-bridge, BCM pin numbering)
+# Each motor uses 1 PWM pin (speed) + 1 digital DIR pin (CW/CCW):
+#   Left:  PWM=17, DIR=27
+#   Right: PWM=22, DIR=23
+# ENA/ENB must be tied HIGH in hardware (jumper to 5V).
 # Change pin numbers below to match your wiring.
 # ---------------------------------------------------------------------------
-_MOTOR_L_IN1 = 17
-_MOTOR_L_IN2 = 27
-_MOTOR_L_ENA = 18
-_MOTOR_R_IN1 = 22
-_MOTOR_R_IN2 = 23
-_MOTOR_R_ENA = 13
+_MOTOR_L_PWM = 17
+_MOTOR_L_DIR = 27
+_MOTOR_R_PWM = 22
+_MOTOR_R_DIR = 23
 _MOTOR_PWM_HZ = 100        # Hz ? adequate for DC brush motors
 
 _pwm_l = _pwm_r = None
@@ -101,17 +101,17 @@ def _setup_motors():
     try:
         _GPIO.setmode(_GPIO.BCM)
         _GPIO.setwarnings(False)
-        for pin in (_MOTOR_L_IN1, _MOTOR_L_IN2, _MOTOR_L_ENA,
-                    _MOTOR_R_IN1, _MOTOR_R_IN2, _MOTOR_R_ENA):
+        for pin in (_MOTOR_L_PWM, _MOTOR_L_DIR,
+                    _MOTOR_R_PWM, _MOTOR_R_DIR):
             _GPIO.setup(pin, _GPIO.OUT, initial=_GPIO.LOW)
-        _pwm_l = _GPIO.PWM(_MOTOR_L_ENA, _MOTOR_PWM_HZ)
-        _pwm_r = _GPIO.PWM(_MOTOR_R_ENA, _MOTOR_PWM_HZ)
+        _pwm_l = _GPIO.PWM(_MOTOR_L_PWM, _MOTOR_PWM_HZ)
+        _pwm_r = _GPIO.PWM(_MOTOR_R_PWM, _MOTOR_PWM_HZ)
         _pwm_l.start(0)
         _pwm_r.start(0)
         _GPIO_READY = True
-        logging.info("Motors ready ? BCM L(IN1=%d IN2=%d ENA=%d) R(IN1=%d IN2=%d ENA=%d)",
-                     _MOTOR_L_IN1, _MOTOR_L_IN2, _MOTOR_L_ENA,
-                     _MOTOR_R_IN1, _MOTOR_R_IN2, _MOTOR_R_ENA)
+        logging.info("Motors ready ? BCM L(PWM=%d DIR=%d) R(PWM=%d DIR=%d)",
+                     _MOTOR_L_PWM, _MOTOR_L_DIR,
+                     _MOTOR_R_PWM, _MOTOR_R_DIR)
     except Exception as exc:
         logging.warning("Motor GPIO setup failed: %s", exc)
 
@@ -120,18 +120,22 @@ def _drive_motors(left: float, right: float) -> None:
     """Drive both motors.  Speed in [-1.0, +1.0]; positive = forward."""
     if not _GPIO_READY:
         return
-    def _apply(in1, in2, pwm, spd):
-        duty = round(min(abs(spd), 1.0) * 100)
+    def _apply(dir_pin, pwm, spd):
+        duty_hi = round(min(abs(spd), 1.0) * 100)
         if spd > 0.02:
-            _GPIO.output(in1, _GPIO.HIGH); _GPIO.output(in2, _GPIO.LOW)
+            # CW: DIR=LOW and PWM controls HIGH-time directly.
+            _GPIO.output(dir_pin, _GPIO.LOW)
+            pwm.ChangeDutyCycle(duty_hi)
         elif spd < -0.02:
-            _GPIO.output(in1, _GPIO.LOW);  _GPIO.output(in2, _GPIO.HIGH)
+            # CCW: DIR=HIGH and motion happens when PWM pin is LOW.
+            # RPi.GPIO PWM controls HIGH-time only, so invert with (100-duty).
+            _GPIO.output(dir_pin, _GPIO.HIGH)
+            pwm.ChangeDutyCycle(100 - duty_hi)
         else:
-            _GPIO.output(in1, _GPIO.LOW);  _GPIO.output(in2, _GPIO.LOW)
-            duty = 0
-        pwm.ChangeDutyCycle(duty)
-    _apply(_MOTOR_L_IN1, _MOTOR_L_IN2, _pwm_l, left)
-    _apply(_MOTOR_R_IN1, _MOTOR_R_IN2, _pwm_r, right)
+            _GPIO.output(dir_pin, _GPIO.LOW)
+            pwm.ChangeDutyCycle(0)
+    _apply(_MOTOR_L_DIR, _pwm_l, left)
+    _apply(_MOTOR_R_DIR, _pwm_r, right)
 
 
 def _stop_motors() -> None:
