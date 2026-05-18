@@ -145,3 +145,23 @@ rpicam-vid ? ffmpeg (H264) ? RTSP :8554/robot
 | Video never loads (spinning) | ICE failure | Check port 8189 is reachable; TCP fallback handles most cases |
 | `mediamtx not found` | Binary missing | Re-run `setup_robot.sh` |
 | Black screen, stream "ready" | Camera not detected | Run `v4l2-ctl --list-devices` |
+
+
+---
+
+## Motor Wiring (L298N H-bridge)
+
+Connect the L298N to the Pi using BCM pin numbering:
+
+| Pi BCM Pin | L298N Pin | Function         |
+|-----------|-----------|------------------|
+| GPIO 17   | IN1       | Left motor FWD   |
+| GPIO 27   | IN2       | Left motor REV   |
+| GPIO 18   | ENA (PWM) | Left motor speed |
+| GPIO 22   | IN3       | Right motor FWD  |
+| GPIO 23   | IN4       | Right motor REV  |
+| GPIO 13   | ENB (PWM) | Right motor speed|
+
+**Dependencies:** `swig`, `liblgpio-dev` (apt) and `rpi-lgpio` (pip) -- added to `setup_robot.sh`.
+
+**Motor Trim:** Use the Motor Trim slider in the dashboard to compensate for speed differences between motors. Slide right if the robot drifts right (slows right motor), slide left if it drifts left.
