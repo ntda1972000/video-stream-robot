@@ -160,14 +160,16 @@
       flex: 1; min-width: 0; container-type: inline-size;
       background: #212121; border: 1px solid #3f3f3f;
       border-radius: 6px; padding: 5px 4px; text-align: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      min-height: 44px;
     }
-    .stat-label { font-size: 9cqi; text-transform: uppercase; letter-spacing: 0.4px; color: #565869; margin-bottom: 2px; }
-    .stat-value { font-size: 14cqi; font-weight: 600; color: #10a37f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat-label { font-size: 9cqi; text-transform: uppercase; letter-spacing: 0.4px; color: #565869; margin-bottom: 3px; line-height: 1.2; }
+    .stat-value { font-size: 14cqi; font-weight: 600; color: #10a37f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
     .stat-sel {
       width: 100%; background: transparent; border: none; color: #10a37f;
-      font-size: 13cqi; font-weight: 600; cursor: pointer; outline: none;
+      font-size: 14cqi; font-weight: 600; cursor: pointer; outline: none;
       text-align: center; text-align-last: center;
-      -webkit-appearance: none; appearance: none; padding: 0;
+      -webkit-appearance: none; appearance: none; padding: 0; line-height: 1.2;
     }
     .stat-sel option { background: #2a2a2a; color: #ececec; }
 
@@ -239,6 +241,21 @@
     }
     .io-toggle.on { background:rgba(16,163,127,0.18); border-color:#10a37f; color:#10a37f; }
     .io-toggle:active { opacity:0.7; }
+
+    /* ── Motor Trim ── */
+    .trim-section { width:100%; flex-shrink:0; padding:6px 0 2px; border-top:1px solid #3f3f3f; margin-top:4px; }
+    .trim-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }
+    .trim-reset { width:20px; height:20px; border-radius:4px; border:1px solid #3f3f3f; background:#212121; color:#8e8ea0; font-size:0.9rem; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; line-height:1; transition:all 0.15s; }
+    .trim-reset:active { background:#3f3f3f; color:#ececec; }
+    .trim-wrap { display:flex; align-items:center; gap:6px; }
+    .trim-side { font-size:0.65rem; color:#8e8ea0; font-weight:600; flex-shrink:0; width:10px; text-align:center; }
+    .trim-track-outer { flex:1; position:relative; height:20px; display:flex; align-items:center; }
+    .trim-bar { position:absolute; height:4px; background:#10a37f; border-radius:2px; pointer-events:none; }
+    .trim-slider { width:100%; -webkit-appearance:none; appearance:none; height:4px; background:#3f3f3f; border-radius:2px; outline:none; cursor:pointer; }
+    .trim-slider::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; background:#ececec; cursor:pointer; border:2.5px solid #10a37f; box-shadow:0 1px 5px rgba(16,163,127,0.4); }
+    .trim-slider::-moz-range-thumb { width:16px; height:16px; border-radius:50%; background:#ececec; cursor:pointer; border:2.5px solid #10a37f; }
+    .trim-val-row { text-align:center; font-size:0.62rem; color:#565869; margin-top:2px; }
+    .trim-val-row span { color:#10a37f; font-weight:600; }
   </style>
 </head>
 <body>
@@ -337,6 +354,23 @@
               </div>
             </div>
 
+
+            <div class="trim-section">
+              <div class="trim-header">
+                <div class="io-panel-title" style="margin:0">&#x2696; Motor Trim</div>
+                <button id="trim-reset" class="trim-reset" title="Reset trim to center">&#x21BA;</button>
+              </div>
+              <div class="trim-wrap">
+                <span class="trim-side">L</span>
+                <div class="trim-track-outer">
+                  <div class="trim-bar" id="trim-bar"></div>
+                  <input type="range" id="motor-trim" class="trim-slider" min="-100" max="100" step="1" value="0">
+                </div>
+                <span class="trim-side">R</span>
+              </div>
+              <div class="trim-val-row">Trim: <span id="trim-val">&plusmn;0%</span></div>
+            </div>
+
             <div class="io-panel">
               <div class="io-panel-title">&#128268; I/O Controls</div>
               <div id="io-list"></div>
@@ -363,6 +397,21 @@
     const streamVideo = document.getElementById("stream-video");
     const camDot      = document.getElementById("cam-dot");
     let webrtcPc = null, wasDown = false;
+    let streamPlaying = false;
+
+    /* ── Derive dot state from both video playback and server health ── */
+    function refreshDot(serverOk) {
+      if (streamPlaying || serverOk) {
+        camDot.className = "cam-dot ok";
+      } else {
+        camDot.className = "cam-dot err";
+      }
+    }
+
+    streamVideo.addEventListener("playing", () => { streamPlaying = true;  refreshDot(false); });
+    ["pause", "emptied", "ended", "stalled"].forEach(evt =>
+      streamVideo.addEventListener(evt, () => { streamPlaying = false; })
+    );
 
     /* ── Helpers ── */
     function setRangeFill(inp, active) {
@@ -645,14 +694,20 @@
         }
         const txEl = document.getElementById("status-tx");
         const rxEl = document.getElementById("status-rx");
-        if (txEl) txEl.textContent = data.net_tx_kbps != null ? Math.round(data.net_tx_kbps/8)+" kB/s" : "N/A";
-        if (rxEl) rxEl.textContent = data.net_rx_kbps != null ? Math.round(data.net_rx_kbps/8)+" kB/s" : "N/A";
+        if (txEl) txEl.textContent = data.net_iface && data.net_tx_kbps != null ? (data.net_tx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
+        if (rxEl) rxEl.textContent = data.net_iface && data.net_rx_kbps != null ? (data.net_rx_kbps / 8).toFixed(1) + " kB/s" : "N/A";
         if (data.io_devices) renderIO(data.io_devices);
+        if (data.motor_trim != null && document.activeElement !== trimSlider) {
+          const tv = Math.round(data.motor_trim * 100);
+          if (parseInt(trimSlider.value, 10) !== tv) { trimSlider.value = String(tv); renderTrim(tv); }
+        }
+        refreshDot(data.camera_ok);
         if (data.camera_ok) {
-          camDot.className = "cam-dot ok";
           if (wasDown) { wasDown = false; startMediaMTX(); }
-        } else { camDot.className = "cam-dot err"; wasDown = true; }
-      }).catch(() => { camDot.className = "cam-dot err"; });
+        } else {
+          wasDown = true;
+        }
+      }).catch(() => { refreshDot(false); });
     }
     updateStatus();
     setInterval(updateStatus, 3000);
@@ -715,6 +770,54 @@
     track.addEventListener("pointercancel", () => { dragging=false; knob.classList.remove("active"); resetKnob(); });
     window.addEventListener("resize", () => { sizeJoystick(); if (!dragging) resetKnob(); });
 
+
+    /* ── Motor Trim ── */
+    const trimSlider = document.getElementById("motor-trim");
+    const trimValEl  = document.getElementById("trim-val");
+    const trimBarEl  = document.getElementById("trim-bar");
+    let trimApiTimer = null;
+
+    function updateTrimBar(v) { // v: integer -100..100
+      if (!trimBarEl || !trimBarEl.parentElement) return;
+      const w = trimBarEl.parentElement.offsetWidth || 200;
+      if (v === 0) {
+        trimBarEl.style.display = "none";
+      } else {
+        trimBarEl.style.display = "";
+        const halfW = w / 2;
+        const fill  = Math.abs(v) / 100 * halfW;
+        if (v > 0) { trimBarEl.style.left = halfW + "px"; trimBarEl.style.width = fill + "px"; }
+        else       { trimBarEl.style.left = (halfW - fill) + "px"; trimBarEl.style.width = fill + "px"; }
+      }
+    }
+
+    function renderTrim(v) { // v: integer -100..100
+      updateTrimBar(v);
+      if      (v > 0) trimValEl.textContent = "R +" + v + "% (slows right)";
+      else if (v < 0) trimValEl.textContent = "L +" + Math.abs(v) + "% (slows left)";
+      else            trimValEl.textContent = "\u00B10%";
+    }
+
+    function saveTrimToApi(v) {
+      clearTimeout(trimApiTimer);
+      trimApiTimer = setTimeout(() => {
+        fetch("/api/update_settings", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ motor_trim: v / 100 }),
+        }).catch(() => {});
+      }, 250);
+    }
+
+    trimSlider.addEventListener("input", () => {
+      const v = parseInt(trimSlider.value, 10);
+      renderTrim(v);
+      saveTrimToApi(v);
+    });
+
+    document.getElementById("trim-reset").addEventListener("click", () => {
+      trimSlider.value = "0"; renderTrim(0); saveTrimToApi(0);
+    });
+
     /* ── Toast notification ── */
     let _toastTimer = null;
     function showToast(msg, ms) {
@@ -734,6 +837,7 @@
     window.addEventListener("load", () => {
       sizeJoystick(); resetKnob();
       renderSpk(); renderMic();
+      renderTrim(0);
       startMediaMTX();
     });
   </script>

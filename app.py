@@ -20,6 +20,7 @@ DEFAULT_SETTINGS = {
     "resolution": [640, 480],
     "fps": 20,
     "rotation": 0,
+    "motor_trim": 0.0,
     "io_devices": [
         {"name": "Device 1", "state": False},
         {"name": "Device 2", "state": False},
@@ -67,6 +68,92 @@ _MTX_CFG    = os.path.join(_BASE, "mediamtx_run.yml")
 _PUB_SCRIPT = os.path.join(_BASE, "publisher.py")
 _CERT       = os.path.join(_BASE, "cert.pem")
 _KEY        = os.path.join(_BASE, "key.pem")
+# ---------------------------------------------------------------------------
+# GPIO MOTOR CONTROL (L298N / L293D H-bridge, BCM pin numbering)
+# Each motor uses 1 PWM pin (speed) + 1 digital DIR pin (CW/CCW):
+#   Left:  PWM=17, DIR=27
+#   Right: PWM=22, DIR=23
+# ENA/ENB must be tied HIGH in hardware (jumper to 5V).
+# Change pin numbers below to match your wiring.
+# ---------------------------------------------------------------------------
+_MOTOR_L_PWM = 17
+_MOTOR_L_DIR = 27
+_MOTOR_R_PWM = 22
+_MOTOR_R_DIR = 23
+_MOTOR_PWM_HZ = 100        # Hz ? adequate for DC brush motors
+
+_pwm_l = _pwm_r = None
+_GPIO_READY = False
+
+try:
+    import RPi.GPIO as _GPIO
+    _GPIO_AVAILABLE = True
+except ImportError:
+    _GPIO = None
+    _GPIO_AVAILABLE = False
+    logging.info("RPi.GPIO not available ? motor output disabled (non-Pi host)")
+
+
+def _setup_motors():
+    global _pwm_l, _pwm_r, _GPIO_READY
+    if not _GPIO_AVAILABLE:
+        return
+    try:
+        _GPIO.setmode(_GPIO.BCM)
+        _GPIO.setwarnings(False)
+        for pin in (_MOTOR_L_PWM, _MOTOR_L_DIR,
+                    _MOTOR_R_PWM, _MOTOR_R_DIR):
+            _GPIO.setup(pin, _GPIO.OUT, initial=_GPIO.LOW)
+        _pwm_l = _GPIO.PWM(_MOTOR_L_PWM, _MOTOR_PWM_HZ)
+        _pwm_r = _GPIO.PWM(_MOTOR_R_PWM, _MOTOR_PWM_HZ)
+        _pwm_l.start(0)
+        _pwm_r.start(0)
+        _GPIO_READY = True
+        logging.info("Motors ready ? BCM L(PWM=%d DIR=%d) R(PWM=%d DIR=%d)",
+                     _MOTOR_L_PWM, _MOTOR_L_DIR,
+                     _MOTOR_R_PWM, _MOTOR_R_DIR)
+    except Exception as exc:
+        logging.warning("Motor GPIO setup failed: %s", exc)
+
+
+def _drive_motors(left: float, right: float) -> None:
+    """Drive both motors.  Speed in [-1.0, +1.0]; positive = forward."""
+    if not _GPIO_READY:
+        return
+    def _apply(dir_pin, pwm, spd):
+        duty_hi = round(min(abs(spd), 1.0) * 100)
+        if spd > 0.02:
+            # CW: DIR=LOW and PWM controls HIGH-time directly.
+            _GPIO.output(dir_pin, _GPIO.LOW)
+            pwm.ChangeDutyCycle(duty_hi)
+        elif spd < -0.02:
+            # CCW: DIR=HIGH and motion happens when PWM pin is LOW.
+            # RPi.GPIO PWM controls HIGH-time only, so invert with (100-duty).
+            _GPIO.output(dir_pin, _GPIO.HIGH)
+            pwm.ChangeDutyCycle(100 - duty_hi)
+        else:
+            _GPIO.output(dir_pin, _GPIO.LOW)
+            pwm.ChangeDutyCycle(0)
+    _apply(_MOTOR_L_DIR, _pwm_l, left)
+    _apply(_MOTOR_R_DIR, _pwm_r, right)
+
+
+def _stop_motors() -> None:
+    _drive_motors(0.0, 0.0)
+
+
+def _cleanup_gpio() -> None:
+    global _GPIO_READY
+    if not _GPIO_AVAILABLE or not _GPIO_READY:
+        return
+    _stop_motors()
+    try:
+        if _pwm_l: _pwm_l.stop()
+        if _pwm_r: _pwm_r.stop()
+        _GPIO.cleanup()
+    except Exception:
+        pass
+    _GPIO_READY = False
 
 def _ensure_cert():
     """Generate a self-signed TLS certificate covering all current IPs (LAN + Tailscale)."""
@@ -135,13 +222,14 @@ api: yes
 apiAddress: 127.0.0.1:9997
 metrics: no
 rtsp: yes
-rtspTransports: [tcp]
 rtspAddress: :8554
 rtmp: no
 hls: no
 srt: no
 webrtc: yes
 webrtcAddress: :8889
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: no
 webrtcICEServers2: []
 webrtcAdditionalHosts: {ice}
 paths:
@@ -211,16 +299,17 @@ def publisher_active():
 
 atexit.register(stop_mediamtx)
 atexit.register(stop_publisher)
+atexit.register(_cleanup_gpio)
 
-# Kill leftovers
+# Kill any leftover processes from a previous run.
+# Subprocess startup (start_mediamtx / start_publisher) is intentionally
+# deferred to _start_bg_threads(), which runs in the gunicorn worker process
+# AFTER fork — this ensures the worker is the proper parent of those
+# subprocesses and Popen.poll() works correctly.
 for sig in (["pkill", "-x", "mediamtx"], ["pkill", "-x", "mtxrpicam"],
             ["pkill", "-f", "publisher.py"]):
     subprocess.run(sig, capture_output=True)
 time.sleep(1)
-
-start_mediamtx()
-time.sleep(2)
-start_publisher()
 
 # ---------------------------------------------------------------------------
 # WATCHDOG
@@ -237,7 +326,6 @@ def _watchdog():
             logging.warning("Publisher died — restarting")
             start_publisher()
 
-threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
 # ---------------------------------------------------------------------------
 # NETWORK MONITOR
@@ -246,9 +334,37 @@ class NetworkMonitor:
     def __init__(self):
         self._tx = self._rx = 0.0
         self._pt = self._px = self._py = 0.0
-        self._iface = next((i for i in ("wlan0","wlan1","eth0")
-                            if os.path.exists(f"/sys/class/net/{i}")), None)
+        self._iface = self._pick_iface()
         threading.Thread(target=self._loop, daemon=True).start()
+
+    @staticmethod
+    def _pick_iface():
+        # 1. Use the interface of the default route (most reliable)
+        try:
+            out = subprocess.check_output(['ip', 'route', 'show', 'default'], text=True)
+            for line in out.splitlines():
+                parts = line.split()
+                if 'dev' in parts:
+                    dev = parts[parts.index('dev') + 1]
+                    if os.path.exists(f'/sys/class/net/{dev}/statistics/tx_bytes'):
+                        return dev
+        except Exception:
+            pass
+        # 2. Fall back: pick non-loopback interface with the highest tx_bytes
+        try:
+            best, best_tx = None, -1
+            for name in os.listdir('/sys/class/net'):
+                if name == 'lo':
+                    continue
+                try:
+                    tx = int(open(f'/sys/class/net/{name}/statistics/tx_bytes').read())
+                    if tx > best_tx:
+                        best_tx, best = tx, name
+                except Exception:
+                    pass
+            return best
+        except Exception:
+            return None
 
     def _loop(self):
         while True:
@@ -269,7 +385,23 @@ class NetworkMonitor:
     def stats(self):
         return {"iface": self._iface, "tx_kbps": max(0.0, self._tx), "rx_kbps": max(0.0, self._rx)}
 
-net_monitor = NetworkMonitor()
+net_monitor = None
+
+def _start_bg_threads():
+    """Start subprocesses and background threads.
+    Must run inside the gunicorn WORKER (after fork) so that Popen objects
+    are owned by the serving process and poll() / wait() work correctly.
+    Called via gunicorn post_worker_init — do NOT call at module level."""
+    global net_monitor
+    start_mediamtx()
+    time.sleep(2)
+    start_publisher()
+    _setup_motors()
+    net_monitor = NetworkMonitor()
+    threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
+
+# NOTE: _start_bg_threads() is intentionally NOT called here.
+# It is called only in the gunicorn worker via post_worker_init.
 
 # ---------------------------------------------------------------------------
 # ROUTES
@@ -280,7 +412,7 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    net = net_monitor.stats()
+    net = net_monitor.stats() if net_monitor else {"iface": None, "tx_kbps": 0.0, "rx_kbps": 0.0}
     ok  = mediamtx_active() and publisher_active()
     return jsonify({
         "resolution": settings["resolution"],
@@ -295,6 +427,7 @@ def api_status():
         "net_rx_kbps": net["rx_kbps"],
         "io_devices": [{"name": d["name"], "state": d["state"]}
                        for d in settings["io_devices"]],
+        "motor_trim": round(settings.get("motor_trim", 0.0), 3),
     })
 
 _ctrl = {"x": 0.0, "y": 0.0}
@@ -302,8 +435,20 @@ _ctrl = {"x": 0.0, "y": 0.0}
 @app.route("/api/control", methods=["POST"])
 def api_control():
     d = request.get_json(silent=True) or {}
-    _ctrl["x"] = max(-1.0, min(1.0, float(d.get("x", 0))))
-    _ctrl["y"] = max(-1.0, min(1.0, float(d.get("y", 0))))
+    x = max(-1.0, min(1.0, float(d.get("x", 0))))
+    y = max(-1.0, min(1.0, float(d.get("y", 0))))
+    _ctrl["x"] = x
+    _ctrl["y"] = y
+    # Tank-drive mixing: left = throttle+steer, right = throttle-steer
+    # motor_trim compensates mechanical speed differences between the two motors:
+    #   trim > 0  right motor runs faster ? slow right (move slider RIGHT in UI)
+    #   trim < 0  left motor runs faster  ? slow left  (move slider LEFT  in UI)
+    trim  = float(settings.get("motor_trim", 0.0))
+    raw_l = max(-1.0, min(1.0, y + x))
+    raw_r = max(-1.0, min(1.0, y - x))
+    left  = max(-1.0, min(1.0, raw_l * (1.0 + min(0.0, trim))))
+    right = max(-1.0, min(1.0, raw_r * (1.0 - max(0.0, trim))))
+    _drive_motors(left, right)
     return jsonify({"status": "ok", **_ctrl})
 
 @app.route("/api/io_toggle", methods=["POST"])
@@ -354,7 +499,12 @@ def api_update_settings():
         stop_publisher()
         time.sleep(0.5)
         start_publisher()
-    return jsonify({"status": "ok", "resolution": settings["resolution"], "fps": settings["fps"]})
+    new_trim = d.get("motor_trim")
+    if new_trim is not None:
+        settings["motor_trim"] = round(max(-1.0, min(1.0, float(new_trim))), 3)
+        save_settings()
+    return jsonify({"status": "ok", "resolution": settings["resolution"],
+                    "fps": settings["fps"], "motor_trim": settings.get("motor_trim", 0.0)})
 
 # ---------------------------------------------------------------------------
 # WEBRTC SIGNALLING PROXY  (keeps browser on one HTTPS origin → no mixed-content)
@@ -409,4 +559,5 @@ if __name__ == "__main__":
         "timeout":      120,
         "keepalive":    2,
         "loglevel":     "warning",
+        "post_worker_init": lambda w: _start_bg_threads(),
     }).run()

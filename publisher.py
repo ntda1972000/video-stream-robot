@@ -70,24 +70,12 @@ def detect_camera_cmd() -> list[str]:
 
 # ── Phát hiện bộ mã hóa hardware ──────────────────────────────
 def detect_video_encoder() -> str:
-    candidates = [
-        ("h264_v4l2m2m", ["-f", "lavfi", "-i", "nullsrc", "-t", "0.1",
-                          "-c:v", "h264_v4l2m2m", "-f", "null", "-"]),
-        ("h264_omx",     ["-f", "lavfi", "-i", "nullsrc", "-t", "0.1",
-                          "-c:v", "h264_omx",     "-f", "null", "-"]),
-    ]
-    for name, test_args in candidates:
-        try:
-            r = subprocess.run(
-                ["ffmpeg", "-loglevel", "error"] + test_args,
-                capture_output=True, timeout=5,
-            )
-            if r.returncode == 0:
-                log.info(f"Dùng bộ mã hóa hardware: {name}")
-                return name
-        except Exception:
-            pass
-    log.warning("Không có hardware encoder, dùng libx264 (CPU).")
+    # Always use libx264 (CPU encoder).
+    # Hardware encoders (h264_v4l2m2m, h264_omx) are NOT tested because the
+    # bcm2835_codec test can deadlock the VCHIQ mutex, corrupting the kernel
+    # codec state for the entire session and preventing rpicam-vid from
+    # capturing frames (even for YUV output which also uses the ISP/codec path).
+    log.info("Dùng bộ mã hóa: libx264 (CPU).")
     return "libx264"
 
 
