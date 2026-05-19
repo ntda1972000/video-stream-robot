@@ -37,6 +37,7 @@ sudo apt-get install -y \
   swig \
   liblgpio-dev \
   python3-venv \
+  python3-picamera2 \
   alsa-utils \
   v4l-utils \
   openssl \
@@ -52,6 +53,7 @@ info "Installing Python packages (flask, gunicorn)..."
 "${VENV_DIR}/bin/pip" install --upgrade pip -q
 "${VENV_DIR}/bin/pip" install rpi-lgpio -q
 "${VENV_DIR}/bin/pip" install flask gunicorn -q
+"${VENV_DIR}/bin/pip" install pyserial pynmea2 opencv-python-headless pytest pytest-mock -q
 ok "Python venv ready at ${VENV_DIR}"
 
 # ?? Download MediaMTX ??????????????????????????????????????????

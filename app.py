@@ -8,6 +8,12 @@ import atexit
 import urllib.request as _urllib_req
 from flask import Flask, render_template, jsonify, request
 
+try:
+    import config as _cfg
+except ImportError:
+    _cfg = None
+    logging.warning("config.py not found — using defaults")
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__)
@@ -68,93 +74,6 @@ _MTX_CFG    = os.path.join(_BASE, "mediamtx_run.yml")
 _PUB_SCRIPT = os.path.join(_BASE, "publisher.py")
 _CERT       = os.path.join(_BASE, "cert.pem")
 _KEY        = os.path.join(_BASE, "key.pem")
-# ---------------------------------------------------------------------------
-# GPIO MOTOR CONTROL (L298N / L293D H-bridge, BCM pin numbering)
-# Each motor uses 1 PWM pin (speed) + 1 digital DIR pin (CW/CCW):
-#   Left:  PWM=17, DIR=27
-#   Right: PWM=22, DIR=23
-# ENA/ENB must be tied HIGH in hardware (jumper to 5V).
-# Change pin numbers below to match your wiring.
-# ---------------------------------------------------------------------------
-_MOTOR_L_PWM = 17
-_MOTOR_L_DIR = 27
-_MOTOR_R_PWM = 22
-_MOTOR_R_DIR = 23
-_MOTOR_PWM_HZ = 100        # Hz ? adequate for DC brush motors
-
-_pwm_l = _pwm_r = None
-_GPIO_READY = False
-
-try:
-    import RPi.GPIO as _GPIO
-    _GPIO_AVAILABLE = True
-except ImportError:
-    _GPIO = None
-    _GPIO_AVAILABLE = False
-    logging.info("RPi.GPIO not available ? motor output disabled (non-Pi host)")
-
-
-def _setup_motors():
-    global _pwm_l, _pwm_r, _GPIO_READY
-    if not _GPIO_AVAILABLE:
-        return
-    try:
-        _GPIO.setmode(_GPIO.BCM)
-        _GPIO.setwarnings(False)
-        for pin in (_MOTOR_L_PWM, _MOTOR_L_DIR,
-                    _MOTOR_R_PWM, _MOTOR_R_DIR):
-            _GPIO.setup(pin, _GPIO.OUT, initial=_GPIO.LOW)
-        _pwm_l = _GPIO.PWM(_MOTOR_L_PWM, _MOTOR_PWM_HZ)
-        _pwm_r = _GPIO.PWM(_MOTOR_R_PWM, _MOTOR_PWM_HZ)
-        _pwm_l.start(0)
-        _pwm_r.start(0)
-        _GPIO_READY = True
-        logging.info("Motors ready ? BCM L(PWM=%d DIR=%d) R(PWM=%d DIR=%d)",
-                     _MOTOR_L_PWM, _MOTOR_L_DIR,
-                     _MOTOR_R_PWM, _MOTOR_R_DIR)
-    except Exception as exc:
-        logging.warning("Motor GPIO setup failed: %s", exc)
-
-
-def _drive_motors(left: float, right: float) -> None:
-    """Drive both motors.  Speed in [-1.0, +1.0]; positive = forward."""
-    if not _GPIO_READY:
-        return
-    def _apply(dir_pin, pwm, spd):
-        duty_hi = round(min(abs(spd), 1.0) * 100)
-        if spd > 0.02:
-            # CW: DIR=LOW and PWM controls HIGH-time directly.
-            _GPIO.output(dir_pin, _GPIO.LOW)
-            pwm.ChangeDutyCycle(duty_hi)
-        elif spd < -0.02:
-            # CCW: DIR=HIGH and motion happens when PWM pin is LOW.
-            # RPi.GPIO PWM controls HIGH-time only, so invert with (100-duty).
-            _GPIO.output(dir_pin, _GPIO.HIGH)
-            pwm.ChangeDutyCycle(100 - duty_hi)
-        else:
-            _GPIO.output(dir_pin, _GPIO.LOW)
-            pwm.ChangeDutyCycle(0)
-    _apply(_MOTOR_L_DIR, _pwm_l, left)
-    _apply(_MOTOR_R_DIR, _pwm_r, right)
-
-
-def _stop_motors() -> None:
-    _drive_motors(0.0, 0.0)
-
-
-def _cleanup_gpio() -> None:
-    global _GPIO_READY
-    if not _GPIO_AVAILABLE or not _GPIO_READY:
-        return
-    _stop_motors()
-    try:
-        if _pwm_l: _pwm_l.stop()
-        if _pwm_r: _pwm_r.stop()
-        _GPIO.cleanup()
-    except Exception:
-        pass
-    _GPIO_READY = False
-
 def _ensure_cert():
     """Generate a self-signed TLS certificate covering all current IPs (LAN + Tailscale)."""
     # Collect all non-loopback IPv4 addresses
@@ -198,6 +117,10 @@ def _ensure_cert():
 _mtx_proc = None
 _pub_proc = None
 _STREAM_PATH = "robot"  # must match publisher.py RTSP_URL path
+_camera = None
+_controller = None
+_gps = None
+_gps_coords = {"lat": None, "lon": None}
 
 # ---------------------------------------------------------------------------
 # MEDIAMTX — RTSP in + WebRTC out
@@ -299,7 +222,6 @@ def publisher_active():
 
 atexit.register(stop_mediamtx)
 atexit.register(stop_publisher)
-atexit.register(_cleanup_gpio)
 
 # Kill any leftover processes from a previous run.
 # Subprocess startup (start_mediamtx / start_publisher) is intentionally
@@ -387,16 +309,68 @@ class NetworkMonitor:
 
 net_monitor = None
 
+def _gps_poll():
+    while True:
+        time.sleep(1)
+        if _gps is None:
+            continue
+        try:
+            coords = _gps.get_coordinates()
+            if coords is not None:
+                _gps_coords["lat"], _gps_coords["lon"] = coords
+        except Exception:
+            pass
+
+
 def _start_bg_threads():
     """Start subprocesses and background threads.
     Must run inside the gunicorn WORKER (after fork) so that Popen objects
     are owned by the serving process and poll() / wait() work correctly.
     Called via gunicorn post_worker_init — do NOT call at module level."""
-    global net_monitor
+    global net_monitor, _camera, _controller, _gps
+    # Camera factory
+    if _cfg is not None:
+        cam_type = getattr(_cfg, "CAMERA_TYPE", "PI_CAMERA")
+        cam_settings = getattr(_cfg, "CAMERA_SETTINGS", {})
+        try:
+            if cam_type == "PI_CAMERA":
+                from implementations.pi_camera import PiCamera
+                _camera = PiCamera(cam_settings.get("PI_CAMERA", {}))
+            elif cam_type == "IP_CAMERA":
+                from implementations.ip_camera import IPCamera
+                _camera = IPCamera(cam_settings.get("IP_CAMERA", {}))
+            elif cam_type == "USB_CAMERA":
+                from implementations.usb_camera import USBCamera
+                _camera = USBCamera(cam_settings.get("USB_CAMERA", {}))
+        except Exception as exc:
+            logging.warning("Camera factory failed (%s): %s", cam_type, exc)
+    # Controller factory
+    if _cfg is not None:
+        ctrl_type = getattr(_cfg, "CONTROLLER_TYPE", "GPIO_CONTROLLER")
+        ctrl_settings = getattr(_cfg, "CONTROLLER_SETTINGS", {})
+        try:
+            if ctrl_type == "GPIO_CONTROLLER":
+                from implementations.gpio_controller import GPIOController
+                _controller = GPIOController(ctrl_settings.get("GPIO_CONTROLLER", {}))
+            elif ctrl_type == "SERIAL_CONTROLLER":
+                from implementations.serial_controller import SerialController
+                _controller = SerialController(ctrl_settings.get("SERIAL_CONTROLLER", {}))
+        except Exception as exc:
+            logging.warning("Controller factory failed (%s): %s", ctrl_type, exc)
+    # GPS factory + polling thread
+    if _cfg is not None:
+        gps_type = getattr(_cfg, "GPS_TYPE", "NONE")
+        gps_settings = getattr(_cfg, "GPS_SETTINGS", {})
+        if gps_type == "SERIAL_GPS":
+            try:
+                from implementations.serial_gps import SerialGPS
+                _gps = SerialGPS(gps_settings.get("SERIAL_GPS", {}))
+                threading.Thread(target=_gps_poll, daemon=True, name="gps_poll").start()
+            except Exception as exc:
+                logging.warning("GPS factory failed: %s", exc)
     start_mediamtx()
     time.sleep(2)
     start_publisher()
-    _setup_motors()
     net_monitor = NetworkMonitor()
     threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
@@ -428,6 +402,8 @@ def api_status():
         "io_devices": [{"name": d["name"], "state": d["state"]}
                        for d in settings["io_devices"]],
         "motor_trim": round(settings.get("motor_trim", 0.0), 3),
+        "gps_lat": _gps_coords["lat"],
+        "gps_lon": _gps_coords["lon"],
     })
 
 _ctrl = {"x": 0.0, "y": 0.0}
@@ -439,16 +415,23 @@ def api_control():
     y = max(-1.0, min(1.0, float(d.get("y", 0))))
     _ctrl["x"] = x
     _ctrl["y"] = y
-    # Tank-drive mixing: left = throttle+steer, right = throttle-steer
-    # motor_trim compensates mechanical speed differences between the two motors:
-    #   trim > 0  right motor runs faster ? slow right (move slider RIGHT in UI)
-    #   trim < 0  left motor runs faster  ? slow left  (move slider LEFT  in UI)
-    trim  = float(settings.get("motor_trim", 0.0))
-    raw_l = max(-1.0, min(1.0, y + x))
-    raw_r = max(-1.0, min(1.0, y - x))
-    left  = max(-1.0, min(1.0, raw_l * (1.0 + min(0.0, trim))))
-    right = max(-1.0, min(1.0, raw_r * (1.0 - max(0.0, trim))))
-    _drive_motors(left, right)
+    if _controller is not None:
+        try:
+            DEAD = 0.15
+            if abs(y) < DEAD and abs(x) < DEAD:
+                _controller.stop()
+            elif abs(x) >= abs(y):
+                if x > 0:
+                    _controller.right()
+                else:
+                    _controller.left()
+            else:
+                if y > 0:
+                    _controller.forward()
+                else:
+                    _controller.backward()
+        except Exception as exc:
+            logging.warning("Controller dispatch error: %s", exc)
     return jsonify({"status": "ok", **_ctrl})
 
 @app.route("/api/io_toggle", methods=["POST"])

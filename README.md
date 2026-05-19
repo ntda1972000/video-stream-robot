@@ -18,11 +18,18 @@ chmod +x setup_robot.sh
 
 The setup script will:
 
-1. Install system packages (`ffmpeg`, `python3-venv`, `v4l-utils`, `alsa-utils`, `openssl`, `curl`)
-2. Create a Python virtualenv at `.venv` and install **Flask** + **gunicorn**
+1. Install system packages (`ffmpeg`, `python3-venv`, `python3-picamera2`, `v4l-utils`, `alsa-utils`, `openssl`, `curl`)
+2. Create a Python virtualenv at `.venv` and install **Flask**, **gunicorn**, **pyserial**, **pynmea2**, **opencv-python-headless**, **pytest**, **pytest-mock**
 3. Download **mediamtx v1.9.0** binary to `~/rc-car/mediamtx`
 4. _(Optional)_ Install **Tailscale** for remote/4G access
 5. _(Optional)_ Install the **systemd service** for autostart on boot
+
+**Before starting the app**, create a `config.py` from the example template:
+
+```bash
+cp config.example.py config.py
+# Edit config.py to match your hardware (camera type, controller type, GPS)
+```
 
 After setup, start the app:
 
@@ -37,6 +44,38 @@ https://<pi-ip>:5000
 ```
 
 ---
+
+## Configuration
+
+Hardware is selected in `config.py` (copied from `config.example.py`). The file is gitignored — each Pi gets its own copy.
+
+### Camera
+
+| `CAMERA_TYPE` | Hardware | Extra packages |
+|---|---|---|
+| `"PI_CAMERA"` | Raspberry Pi CSI camera (picamera2) | `python3-picamera2` (apt) |
+| `"IP_CAMERA"` | Network/RTSP camera | `opencv-python-headless` (pip) |
+| `"USB_CAMERA"` | USB webcam | `opencv-python-headless` (pip) |
+
+### Motor Controller
+
+| `CONTROLLER_TYPE` | Hardware |
+|---|---|
+| `"GPIO_CONTROLLER"` | L298N / L293D H-bridge wired to BCM GPIO pins |
+| `"SERIAL_CONTROLLER"` | Arduino or MCU receiving single-byte serial commands |
+
+For `SERIAL_CONTROLLER` the MCU must accept: `f`=forward, `b`=backward, `l`=left, `r`=right, `s`=stop.
+
+### GPS
+
+| `GPS_TYPE` | Hardware | Extra packages |
+|---|---|---|
+| `"SERIAL_GPS"` | NMEA 0183 GPS module (e.g. u-blox NEO-6M) | `pyserial`, `pynmea2` |
+| `"NONE"` | No GPS | — |
+
+Wire the GPS module: GPS TX → Pi RX (e.g. GPIO 15 = `/dev/ttyS0`).
+
+When GPS data is available, `/api/status` returns `gps_lat` and `gps_lon`. Click the **map-pin button** on the video overlay to show/hide the Leaflet.js minimap.
 
 ## Remote Access via Tailscale (4G / Internet)
 

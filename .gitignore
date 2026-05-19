@@ -11,6 +11,9 @@ mediamtx/mediamtx
 # Runtime-generated config
 mediamtx_run.yml
 
+# Hardware config — machine-specific, never commit
+config.py
+
 # Python
 __pycache__/
 *.pyc
